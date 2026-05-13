@@ -1,47 +1,10 @@
 <script lang="ts">
 	import "./layout.css";
 	import { grades } from "$lib/stores/grades.svelte";
-	import { createBrowserClient } from "@supabase/ssr";
-	import { PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY } from "$env/static/public";
-	import { invalidateAll, goto } from "$app/navigation";
-	import { onMount } from "svelte";
-	import { browser } from "$app/environment";
-	import { page } from "$app/state";
 
-	let { children, data } = $props();
+	let { children } = $props();
 
-	const supabase = browser
-		? createBrowserClient(PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY)
-		: null;
-
-	onMount(() => {
-		if (!supabase) return;
-
-		// Listen for auth state changes (sign-out in another tab, token refresh, etc.)
-		// We intentionally ignore the session parameter — use getUser() server-side instead.
-		const {
-			data: { subscription }
-		} = supabase.auth.onAuthStateChange((event) => {
-			if (event === "SIGNED_OUT") {
-				invalidateAll();
-			} else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
-				invalidateAll();
-			}
-		});
-
-		return () => subscription.unsubscribe();
-	});
 	$effect(() => {
-		if (!browser) return;
-
-		if (data.user === null) {
-			grades.reset();
-			if (page.url.pathname !== "/auth") {
-				goto("/auth");
-			}
-			return;
-		}
-
 		if (!grades.loaded) {
 			grades.load();
 		}
@@ -49,17 +12,14 @@
 </script>
 
 <svelte:head>
-	<title>tracksem — sem 2 grades</title>
+	<title>tracksem — {grades.activeSemester?.label ?? 'grades'}</title>
 	<meta
 		name="description"
-		content="Track your semester 2 course grades and projections"
+		content="Track your semester course grades and projections"
 	/>
 </svelte:head>
 
-<!-- Auth page renders immediately without the loading gate -->
-{#if data.user === null}
-	{@render children()}
-{:else if grades.loaded}
+{#if grades.loaded}
 	{@render children()}
 {:else}
 	<div class="loading">

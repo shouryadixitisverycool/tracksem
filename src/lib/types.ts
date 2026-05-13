@@ -33,3 +33,13 @@ export type Course = {
   color: string;
   components: Component[];
 };
+
+export type SemesterMeta = {
+  id: string;
+  label: string;
+  branch: string;
+  semester: string;
+  createdAt: number;
+  isActive: boolean;
+  courseCount: number;
+};

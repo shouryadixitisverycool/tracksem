@@ -1,18 +1,8 @@
 <script lang="ts">
+    import { goto } from "$app/navigation";
     import { grades } from "$lib/stores/grades.svelte";
     import CourseCard from "$lib/components/CourseCard.svelte";
     import { BRANCHES, getSemesters, getCourses } from "$lib/data/courses";
-    import { page } from "$app/state";
-    import { createBrowserClient } from "@supabase/ssr";
-    import { PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY } from "$env/static/public";
-    import { goto } from "$app/navigation";
-
-    const supabase = createBrowserClient(PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY);
-
-    async function logout() {
-        await supabase.auth.signOut();
-        goto("/auth");
-    }
 
     function getOverallGrade(): { grade: number | null; count: number } {
         let total = 0;
@@ -82,15 +72,13 @@
         closeAddCourse();
     }
 
-    // ─── Onboarding state ───────────────────────────────────────────────────────
+    // ─── Onboarding state (first-time / empty semester) ─────────────────────────
 
     let selectedBranch = $state("");
     let selectedSemester = $state("");
     let seeding = $state(false);
 
     // ─── Encryption key state ────────────────────────────────────────────────────
-    // TODO:
-    //  use ;P
 
     function generateKey(): string {
         const bytes = new Uint8Array(16);
@@ -118,6 +106,47 @@
         await grades.seedFromCatalog(selectedBranch, selectedSemester);
         seeding = false;
     }
+
+    // ─── Semester switcher ───────────────────────────────────────────────────────
+
+    let switcherOpen = $state(false);
+    let renamingId = $state<string | null>(null);
+    let renameValue = $state("");
+    let deletingId = $state<string | null>(null);
+
+    function openSwitcher() { switcherOpen = true; }
+    function closeSwitcher() {
+        switcherOpen = false;
+        renamingId = null;
+        renameValue = "";
+        deletingId = null;
+    }
+
+    async function handleSwitch(id: string) {
+        if (id === grades.activeSemesterId) { closeSwitcher(); return; }
+        await grades.switchSemester(id);
+        closeSwitcher();
+    }
+
+    function startRename(id: string, currentLabel: string) {
+        renamingId = id;
+        renameValue = currentLabel;
+    }
+
+    async function commitRename(id: string) {
+        const label = renameValue.trim();
+        if (label) await grades.renameSemester(id, label);
+        renamingId = null;
+        renameValue = "";
+    }
+
+    function startDelete(id: string) { deletingId = id; }
+
+    async function confirmDelete(id: string) {
+        await grades.deleteSemester(id);
+        deletingId = null;
+        closeSwitcher();
+    }
 </script>
 
 <div class="page">
@@ -134,6 +163,97 @@
                 </div>
             </div>
 
+            <!-- Semester switcher -->
+            {#if grades.semesters.length > 0}
+                <div class="sem-switcher">
+                    <button class="sem-trigger mono" onclick={openSwitcher}>
+                        <span class="sem-dot active-dot"></span>
+                        <span class="sem-label">{grades.activeSemester?.label ?? "—"}</span>
+                        <span class="sem-chevron">▾</span>
+                    </button>
+
+                    {#if switcherOpen}
+                        <button
+                            class="switcher-backdrop"
+                            type="button"
+                            onclick={closeSwitcher}
+                            aria-label="Close semester switcher"
+                        ></button>
+                        <div class="sem-dropdown" role="menu">
+                            <div class="sem-dropdown-label mono">// semesters</div>
+                            {#each grades.semesters as sem (sem.id)}
+                                <div
+                                    class="sem-row"
+                                    class:active={sem.id === grades.activeSemesterId}
+                                >
+                                    {#if renamingId === sem.id}
+                                        <input
+                                            class="sem-rename-input mono"
+                                            bind:value={renameValue}
+                                            onkeydown={(e) => {
+                                                if (e.key === 'Enter') commitRename(sem.id);
+                                                if (e.key === 'Escape') { renamingId = null; }
+                                            }}
+                                            onclick={(e) => e.stopPropagation()}
+                                        />
+                                        <button
+                                            class="sem-action-btn mono"
+                                            onclick={(e) => { e.stopPropagation(); commitRename(sem.id); }}
+                                        >✓</button>
+                                        <button
+                                            class="sem-action-btn mono"
+                                            onclick={(e) => { e.stopPropagation(); renamingId = null; }}
+                                        >✕</button>
+                                    {:else if deletingId === sem.id}
+                                        <span class="sem-delete-confirm mono">delete "{sem.label}"?</span>
+                                        <button
+                                            class="sem-action-btn danger mono"
+                                            onclick={(e) => { e.stopPropagation(); confirmDelete(sem.id); }}
+                                        >yes</button>
+                                        <button
+                                            class="sem-action-btn mono"
+                                            onclick={(e) => { e.stopPropagation(); deletingId = null; }}
+                                        >no</button>
+                                    {:else}
+                                        <button
+                                            class="sem-switch-btn"
+                                            onclick={() => handleSwitch(sem.id)}
+                                            role="menuitem"
+                                        >
+                                            <span class="sem-indicator">
+                                                {sem.id === grades.activeSemesterId ? "●" : "○"}
+                                            </span>
+                                            <span class="sem-name mono">{sem.label}</span>
+                                            <span class="sem-count mono">{sem.courseCount} courses</span>
+                                        </button>
+                                        <button
+                                            class="sem-icon-btn mono"
+                                            title="rename"
+                                            onclick={(e) => { e.stopPropagation(); startRename(sem.id, sem.label); }}
+                                        >✎</button>
+                                        {#if grades.semesters.length > 1}
+                                            <button
+                                                class="sem-icon-btn danger mono"
+                                                title="delete"
+                                                onclick={(e) => { e.stopPropagation(); startDelete(sem.id); }}
+                                            >✕</button>
+                                        {/if}
+                                    {/if}
+                                </div>
+                            {/each}
+                            <div class="sem-divider"></div>
+                            <button
+                                class="sem-new-btn mono"
+                                onclick={() => { closeSwitcher(); goto('/new-semester'); }}
+                                role="menuitem"
+                            >
+                                + new semester
+                            </button>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+
             <div class="header-right">
                 {#if overall.grade !== null}
                     <div
@@ -148,8 +268,7 @@
                 {/if}
 
                 <div class="user-group">
-                    <span class="user-email mono">{page.data.user?.email}</span>
-                    <button class="logout-btn mono" onclick={logout}>sign_out</button>
+                    <span class="user-email mono">local sqlite</span>
                 </div>
             </div>
         </div>
@@ -157,8 +276,8 @@
 
     <!-- Course grid -->
     <main class="main">
-        {#if grades.courses.length === 0}
-            <!-- Onboarding -->
+        {#if grades.semesters.length === 0}
+            <!-- First-time onboarding — no semesters yet, redirect to /new-semester -->
             <div class="onboard-wrap">
                 <div class="onboard-card">
                     <div class="onboard-header mono">// setup</div>
@@ -259,11 +378,47 @@
                         <button
                             class="onboard-btn mono"
                             disabled={seeding}
-                            onclick={handleSeed}
+                            onclick={async () => {
+                                if (!selectedBranch || !selectedSemester || seeding) return;
+                                seeding = true;
+                                const label = `${selectedBranch} · ${selectedSemester}`;
+                                await grades.createSemester(label, selectedBranch, selectedSemester);
+                                await grades.seedFromCatalog(selectedBranch, selectedSemester);
+                                seeding = false;
+                            }}
                         >
                             {seeding ? "setting up..." : "confirm"}
                         </button>
                     {/if}
+                </div>
+            </div>
+        {:else if grades.courses.length === 0}
+            <!-- Semester exists but no courses -->
+            <div class="onboard-wrap">
+                <div class="onboard-card">
+                    <div class="onboard-header mono">// empty semester</div>
+                    <div class="onboard-sub">
+                        no courses in <strong>{grades.activeSemester?.label}</strong> yet
+                    </div>
+                    <button
+                        class="onboard-btn mono"
+                        onclick={() => goto('/new-semester')}
+                    >
+                        + set up a new semester
+                    </button>
+                    <button
+                        class="onboard-btn-secondary mono"
+                        disabled={seeding}
+                        onclick={async () => {
+                            const s = grades.activeSemester;
+                            if (!s || s.branch === 'unknown' || seeding) return;
+                            seeding = true;
+                            await grades.seedFromCatalog(s.branch, s.semester);
+                            seeding = false;
+                        }}
+                    >
+                        {seeding ? "seeding..." : "re-seed from catalog"}
+                    </button>
                 </div>
             </div>
         {:else}
@@ -334,9 +489,11 @@
             </div>
         {/if}
 
-        <div class="hint mono">
-            click a course to enter scores &amp; manage components
-        </div>
+        {#if grades.courses.length > 0}
+            <div class="hint mono">
+                click a course to enter scores &amp; manage components
+            </div>
+        {/if}
     </main>
 </div>
 
@@ -428,24 +585,242 @@
         max-width: 180px;
     }
 
-    .logout-btn {
-        font-size: 0.68rem;
-        background: none;
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 4px;
-        color: oklch(0.4 0.02 265);
-        padding: 0.22rem 0.55rem;
+    /* ── Semester switcher ──────────────────────── */
+
+    .sem-switcher {
+        position: relative;
+        flex: 1;
+        min-width: 0;
+        max-width: 240px;
+    }
+
+    .sem-trigger {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: oklch(1 0 0 / 4%);
+        border: 1px solid oklch(1 0 0 / 10%);
+        border-radius: 6px;
+        padding: 0.35rem 0.6rem;
+        color: oklch(0.75 0.02 265);
+        font-size: 0.7rem;
         cursor: pointer;
         transition: all 0.15s ease;
         white-space: nowrap;
+        overflow: hidden;
+        width: 100%;
+        text-align: left;
+    }
+
+    .sem-trigger:hover {
+        border-color: oklch(1 0 0 / 18%);
+        color: oklch(0.9 0.01 265);
+        background: oklch(1 0 0 / 7%);
+    }
+
+    .active-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #22d3ee;
         flex-shrink: 0;
     }
 
-    .logout-btn:hover {
-        color: #f87171;
-        border-color: #f8717133;
-        background: #f8717110;
+    .sem-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
+
+    .sem-chevron {
+        font-size: 0.6rem;
+        opacity: 0.5;
+        flex-shrink: 0;
+    }
+
+    .switcher-backdrop {
+        position: fixed;
+        inset: 0;
+        background: transparent;
+        border: none;
+        padding: 0;
+        margin: 0;
+        cursor: default;
+        z-index: 59;
+    }
+
+    .sem-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        left: 0;
+        min-width: 260px;
+        background: oklch(0.13 0.02 265);
+        border: 1px solid oklch(1 0 0 / 14%);
+        border-radius: 8px;
+        box-shadow: 0 12px 40px oklch(0 0 0 / 50%);
+        z-index: 60;
+        overflow: hidden;
+        padding: 0.4rem 0;
+    }
+
+    .sem-dropdown-label {
+        font-size: 0.6rem;
+        color: oklch(0.38 0.02 265);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        padding: 0.3rem 0.75rem 0.5rem;
+    }
+
+    .sem-row {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0 0.4rem;
+    }
+
+    .sem-row.active .sem-switch-btn {
+        color: oklch(0.9 0.01 265);
+    }
+
+    .sem-switch-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        background: transparent;
+        border: none;
+        border-radius: 5px;
+        padding: 0.4rem 0.35rem;
+        cursor: pointer;
+        text-align: left;
+        color: oklch(0.65 0.02 265);
+        transition: all 0.12s ease;
+        min-width: 0;
+    }
+
+    .sem-switch-btn:hover {
+        background: oklch(1 0 0 / 5%);
+        color: oklch(0.9 0.01 265);
+    }
+
+    .sem-indicator {
+        font-size: 0.6rem;
+        color: #22d3ee;
+        flex-shrink: 0;
+        width: 10px;
+    }
+
+    .sem-name {
+        font-size: 0.72rem;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .sem-count {
+        font-size: 0.6rem;
+        color: oklch(0.38 0.02 265);
+        flex-shrink: 0;
+    }
+
+    .sem-icon-btn {
+        background: transparent;
+        border: none;
+        color: oklch(0.35 0.02 265);
+        font-size: 0.7rem;
+        padding: 0.3rem 0.25rem;
+        cursor: pointer;
+        border-radius: 4px;
+        flex-shrink: 0;
+        transition: color 0.12s ease;
+        line-height: 1;
+    }
+
+    .sem-icon-btn:hover {
+        color: oklch(0.7 0.02 265);
+        background: oklch(1 0 0 / 5%);
+    }
+
+    .sem-icon-btn.danger:hover {
+        color: #f87171;
+    }
+
+    .sem-rename-input {
+        flex: 1;
+        background: oklch(1 0 0 / 5%);
+        border: 1px solid oklch(1 0 0 / 15%);
+        border-radius: 4px;
+        padding: 0.25rem 0.4rem;
+        color: oklch(0.9 0.01 265);
+        font-size: 0.7rem;
+        outline: none;
+        min-width: 0;
+    }
+
+    .sem-rename-input:focus {
+        border-color: #22d3ee44;
+    }
+
+    .sem-action-btn {
+        background: transparent;
+        border: none;
+        color: oklch(0.5 0.02 265);
+        font-size: 0.68rem;
+        padding: 0.2rem 0.3rem;
+        cursor: pointer;
+        border-radius: 3px;
+        flex-shrink: 0;
+        transition: color 0.12s ease;
+        line-height: 1;
+    }
+
+    .sem-action-btn:hover {
+        color: oklch(0.85 0.02 265);
+    }
+
+    .sem-action-btn.danger:hover {
+        color: #f87171;
+    }
+
+    .sem-delete-confirm {
+        font-size: 0.65rem;
+        color: oklch(0.55 0.02 265);
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .sem-divider {
+        height: 1px;
+        background: oklch(1 0 0 / 8%);
+        margin: 0.4rem 0;
+    }
+
+    .sem-new-btn {
+        display: block;
+        width: 100%;
+        background: transparent;
+        border: none;
+        padding: 0.4rem 0.75rem;
+        color: oklch(0.5 0.02 265);
+        font-size: 0.7rem;
+        cursor: pointer;
+        text-align: left;
+        transition: all 0.12s ease;
+        letter-spacing: 0.03em;
+    }
+
+    .sem-new-btn:hover {
+        color: #22d3ee;
+        background: oklch(1 0 0 / 4%);
+    }
+
+    /* ── Main layout ────────────────────────────── */
 
     .main {
         flex: 1;
@@ -794,6 +1169,11 @@
         color: oklch(0.45 0.02 265);
     }
 
+    .onboard-sub strong {
+        color: oklch(0.72 0.02 265);
+        font-weight: 600;
+    }
+
     .onboard-select {
         background: oklch(1 0 0 / 4%);
         border: 1px solid oklch(1 0 0 / 10%);
@@ -881,6 +1261,27 @@
         cursor: not-allowed;
     }
 
+    .onboard-btn-secondary {
+        font-size: 0.72rem;
+        background: none;
+        border: 1px solid oklch(1 0 0 / 8%);
+        border-radius: 6px;
+        color: oklch(0.45 0.02 265);
+        padding: 0.5rem 0.6rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
+    }
+
+    .onboard-btn-secondary:hover:enabled {
+        color: oklch(0.7 0.02 265);
+        border-color: oklch(1 0 0 / 16%);
+    }
+
+    .onboard-btn-secondary:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
     /* ── Mobile ≤ 768px ──────────────────────── */
     @media (max-width: 768px) {
         .header {
@@ -922,6 +1323,9 @@
         }
         .modal-card {
             width: 100%;
+        }
+        .sem-switcher {
+            max-width: 160px;
         }
     }
 

@@ -1,4 +1,4 @@
-import type { Course, Component, SubItem } from '$lib/types';
+import type { Course, Component, SubItem, SemesterMeta } from '$lib/types';
 import { predictGrade, percentileToGrade, getCurvedGradeColor } from '$lib/curveGrading';
 
 function generateId(): string {
@@ -157,48 +157,135 @@ async function api(path: string, method: string, body?: unknown): Promise<unknow
 
 class GradesStore {
     courses = $state<Course[]>([]);
+    semesters = $state<SemesterMeta[]>([]);
+    activeSemesterId = $state<string | null>(null);
     loaded = $state(false);
+
+    get activeSemester(): SemesterMeta | null {
+        return this.semesters.find((s) => s.id === this.activeSemesterId) ?? null;
+    }
 
     /** Clear all state — call on sign-out so the next user starts fresh */
     reset(): void {
         this.courses = [];
+        this.semesters = [];
+        this.activeSemesterId = null;
         this.loaded = false;
     }
 
-    /** Load all courses from the API */
+    /** Load semesters then courses from the API */
     async load(): Promise<void> {
         if (this.loaded) return;
-        const res = await fetch('/api/courses');
-        this.courses = await res.json();
+        const semRes = await fetch('/api/semesters');
+        const sems: SemesterMeta[] = await semRes.json();
+        this.semesters = sems;
+        const active = sems.find((s) => s.isActive) ?? sems[sems.length - 1] ?? null;
+        this.activeSemesterId = active?.id ?? null;
+
+        if (this.activeSemesterId) {
+            const res = await fetch(`/api/courses?semesterId=${this.activeSemesterId}`);
+            this.courses = await res.json();
+        } else {
+            this.courses = [];
+        }
         this.loaded = true;
     }
 
     /** Force reload from DB */
     async reload(): Promise<void> {
-        const res = await fetch('/api/courses');
-        this.courses = await res.json();
+        const semRes = await fetch('/api/semesters');
+        this.semesters = await semRes.json();
+        const active = this.semesters.find((s) => s.isActive) ?? this.semesters[this.semesters.length - 1] ?? null;
+        // Keep current activeSemesterId if still valid, else use DB active
+        if (this.activeSemesterId && !this.semesters.find((s) => s.id === this.activeSemesterId)) {
+            this.activeSemesterId = active?.id ?? null;
+        } else if (!this.activeSemesterId) {
+            this.activeSemesterId = active?.id ?? null;
+        }
+        await this.#loadCoursesForSemester(this.activeSemesterId);
+    }
+
+    /** Switch the viewed + active semester (persists to DB) */
+    async switchSemester(id: string): Promise<void> {
+        await api('/api/semesters/active', 'POST', { id });
+        this.semesters = this.semesters.map((s) => ({ ...s, isActive: s.id === id }));
+        this.activeSemesterId = id;
+        await this.#loadCoursesForSemester(id);
+    }
+
+    /** Create a new semester (sets it active) */
+    async createSemester(label: string, branch: string, semester: string): Promise<SemesterMeta> {
+        const id = generateId();
+        const meta = (await api('/api/semesters', 'POST', { id, label, branch, semester })) as SemesterMeta;
+        this.semesters = [...this.semesters.map((s) => ({ ...s, isActive: false })), meta];
+        this.activeSemesterId = meta.id;
+        this.courses = [];
+        return meta;
+    }
+
+    /** Rename a semester label */
+    async renameSemester(id: string, label: string): Promise<void> {
+        this.semesters = this.semesters.map((s) => (s.id === id ? { ...s, label } : s));
+        await api('/api/semesters', 'PATCH', { id, label });
+    }
+
+    /** Delete a semester and its courses */
+    async deleteSemester(id: string): Promise<void> {
+        await api('/api/semesters', 'DELETE', { id });
+        this.semesters = this.semesters.filter((s) => s.id !== id);
+        if (this.activeSemesterId === id) {
+            const next = this.semesters[this.semesters.length - 1] ?? null;
+            if (next) {
+                await this.switchSemester(next.id);
+            } else {
+                this.activeSemesterId = null;
+                this.courses = [];
+            }
+        }
     }
 
     /** Add a new course with default components */
     async addCourse(name: string, fullName: string, color: string): Promise<void> {
-        const created = (await api('/api/courses', 'POST', { name, fullName, color })) as Course;
+        const created = (await api('/api/courses', 'POST', {
+            name,
+            fullName,
+            color,
+            semesterId: this.activeSemesterId
+        })) as Course;
         this.courses = [...this.courses, created];
+        // bump courseCount in semesters
+        if (this.activeSemesterId) {
+            this.semesters = this.semesters.map((s) =>
+                s.id === this.activeSemesterId ? { ...s, courseCount: s.courseCount + 1 } : s
+            );
+        }
     }
 
     /** Seed courses from the catalog for a given branch + semester */
     async seedFromCatalog(branch: string, semester: string): Promise<void> {
+        if (!this.activeSemesterId) return;
         const res = await fetch('/api/courses/seed', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ branch, semester })
+            body: JSON.stringify({ branch, semester, semesterId: this.activeSemesterId })
         });
-        this.courses = await res.json();
+        const seeded: Course[] = await res.json();
+        this.courses = seeded;
+        // update courseCount
+        this.semesters = this.semesters.map((s) =>
+            s.id === this.activeSemesterId ? { ...s, courseCount: seeded.length } : s
+        );
     }
 
     /** Delete a course */
     async deleteCourse(courseId: string): Promise<void> {
         await api('/api/courses', 'DELETE', { id: courseId });
         this.courses = this.courses.filter((c) => c.id !== courseId);
+        if (this.activeSemesterId) {
+            this.semesters = this.semesters.map((s) =>
+                s.id === this.activeSemesterId ? { ...s, courseCount: Math.max(0, s.courseCount - 1) } : s
+            );
+        }
     }
 
     getCourse(id: string): Course | undefined {
@@ -425,6 +512,15 @@ class GradesStore {
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────────
+
+    async #loadCoursesForSemester(semesterId: string | null): Promise<void> {
+        if (!semesterId) {
+            this.courses = [];
+            return;
+        }
+        const res = await fetch(`/api/courses?semesterId=${semesterId}`);
+        this.courses = await res.json();
+    }
 
     #getComp(courseId: string, componentId: string): Component | undefined {
         return this.courses.find((c) => c.id === courseId)?.components.find((c) => c.id === componentId);

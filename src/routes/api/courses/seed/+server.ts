@@ -5,13 +5,8 @@ import { json } from "@sveltejs/kit";
 import type { RequestHandler } from "./$types";
 
 /** POST /api/courses/seed  → seed courses from catalog for a branch + semester */
-export const POST: RequestHandler = async ({ request, locals }) => {
-  const {
-    data: { user },
-  } = await locals.supabase.auth.getUser();
-  if (!user) return json({ error: "Unauthorized" }, { status: 401 });
-
-  const { branch, semester } = await request.json();
+export const POST: RequestHandler = async ({ request }) => {
+  const { branch, semester, semesterId } = await request.json();
   const coursesRequired = getCourses(branch, semester);
   if (coursesRequired.length === 0) {
     return json(
@@ -22,7 +17,12 @@ export const POST: RequestHandler = async ({ request, locals }) => {
       { status: 400 },
     );
   }
-  const courses = await seedByBranch(locals.supabase, user.id, coursesRequired);
+
+  if (!semesterId) {
+    return json({ error: "Missing semesterId" }, { status: 400 });
+  }
+
+  const courses = await seedByBranch(coursesRequired, semesterId);
 
   return json(courses);
 };

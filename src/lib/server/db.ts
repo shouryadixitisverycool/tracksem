@@ -2,13 +2,24 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { DEFAULT_COURSES, SEM_DATA } from '$lib/data/courses';
-import type { Course, Component, SubItem } from '$lib/types';
+import type { Course, Component, SubItem, SemesterMeta } from '$lib/types';
+
+type SemesterRow = {
+	id: string;
+	label: string;
+	branch: string;
+	semester: string;
+	created_at: number;
+	is_active: number;
+	course_count: number;
+};
 
 type CourseRow = {
 	id: string;
 	name: string;
 	full_name: string;
 	color: string;
+	semester_id: string | null;
 };
 
 type ComponentRow = {
@@ -49,7 +60,18 @@ const db = new Database(dbPath);
 db.pragma('foreign_keys = ON');
 db.pragma('journal_mode = WAL');
 
+// ─── Base schema ─────────────────────────────────────────────────────────────
+
 db.exec(`
+	CREATE TABLE IF NOT EXISTS semesters (
+		id TEXT PRIMARY KEY,
+		label TEXT NOT NULL,
+		branch TEXT NOT NULL,
+		semester TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		is_active INTEGER NOT NULL DEFAULT 0
+	);
+
 	CREATE TABLE IF NOT EXISTS courses (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -90,6 +112,8 @@ db.exec(`
 	);
 `);
 
+// ─── Column migrations ────────────────────────────────────────────────────────
+
 const componentColumns = db.prepare('PRAGMA table_info(components)').all() as { name: string }[];
 if (!componentColumns.some((column) => column.name === 'scale_target_id')) {
 	db.prepare('ALTER TABLE components ADD COLUMN scale_target_id TEXT').run();
@@ -100,30 +124,77 @@ if (!subItemColumns.some((column) => column.name === 'scale_target_id')) {
 	db.prepare('ALTER TABLE sub_items ADD COLUMN scale_target_id TEXT').run();
 }
 
-function fetchAllCourses(): Course[] {
+// Add semester_id column to courses if it doesn't exist
+const courseColumns = db.prepare('PRAGMA table_info(courses)').all() as { name: string }[];
+if (!courseColumns.some((col) => col.name === 'semester_id')) {
+	db.prepare('ALTER TABLE courses ADD COLUMN semester_id TEXT REFERENCES semesters(id)').run();
+}
+
+// ─── Startup migration: orphaned courses → default semester ──────────────────
+
+const orphanCount = (
+	db.prepare('SELECT COUNT(*) as c FROM courses WHERE semester_id IS NULL').get() as { c: number }
+).c;
+
+if (orphanCount > 0) {
+	const semId = crypto.randomUUID();
+	db.prepare(
+		`INSERT INTO semesters (id, label, branch, semester, created_at, is_active)
+		 VALUES (?, ?, ?, ?, ?, 1)`
+	).run(semId, 'Semester 1', 'unknown', 'unknown', Date.now());
+	db.prepare('UPDATE courses SET semester_id = ? WHERE semester_id IS NULL').run(semId);
+}
+
+// If no semesters at all and no courses, ensure is_active logic still works (nothing to do).
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+function rowsToSemesterMeta(rows: SemesterRow[]): SemesterMeta[] {
+	return rows.map((r) => ({
+		id: r.id,
+		label: r.label,
+		branch: r.branch,
+		semester: r.semester,
+		createdAt: r.created_at,
+		isActive: r.is_active === 1,
+		courseCount: r.course_count
+	}));
+}
+
+function fetchCoursesBySemester(semesterId: string): Course[] {
 	const courseRows = db
-		.prepare('SELECT id, name, full_name, color FROM courses ORDER BY rowid ASC')
-		.all() as CourseRow[];
+		.prepare(
+			'SELECT id, name, full_name, color, semester_id FROM courses WHERE semester_id = ? ORDER BY rowid ASC'
+		)
+		.all(semesterId) as CourseRow[];
 
 	if (courseRows.length === 0) return [];
+
+	const courseIds = courseRows.map((r) => `'${r.id}'`).join(',');
 
 	const componentRows = db
 		.prepare(
 			`SELECT id, course_id, name, weight, max_score, score, best_of, sort_order, stats_mode, scale_target_id,
 			 class_avg, class_median, class_max, class_std_dev
 			 FROM components
+			 WHERE course_id IN (${courseIds})
 			 ORDER BY course_id, sort_order ASC`
 		)
 		.all() as ComponentRow[];
 
-	const subRows = db
-		.prepare(
-			`SELECT id, component_id, name, score, max_score, sort_order,
-			 class_avg, class_median, class_max, class_std_dev, scale_target_id
-			 FROM sub_items
-			 ORDER BY component_id, sort_order ASC`
-		)
-		.all() as SubItemRow[];
+	const compIds = componentRows.map((r) => `'${r.id}'`).join(',');
+	const subRows =
+		compIds.length > 0
+			? (db
+					.prepare(
+						`SELECT id, component_id, name, score, max_score, sort_order,
+					 class_avg, class_median, class_max, class_std_dev, scale_target_id
+					 FROM sub_items
+					 WHERE component_id IN (${compIds})
+					 ORDER BY component_id, sort_order ASC`
+					)
+					.all() as SubItemRow[])
+			: [];
 
 	const subsByComp = new Map<string, SubItem[]>();
 	for (const row of subRows) {
@@ -180,13 +251,14 @@ function fetchAllCourses(): Course[] {
 	}));
 }
 
-function insertCourse(courseId: string, course: Pick<Course, 'name' | 'fullName' | 'color'>): void {
-	db.prepare('INSERT INTO courses (id, name, full_name, color) VALUES (?, ?, ?, ?)').run(
-		courseId,
-		course.name,
-		course.fullName,
-		course.color
-	);
+function insertCourse(
+	courseId: string,
+	course: Pick<Course, 'name' | 'fullName' | 'color'>,
+	semesterId: string
+): void {
+	db.prepare(
+		'INSERT INTO courses (id, name, full_name, color, semester_id) VALUES (?, ?, ?, ?, ?)'
+	).run(courseId, course.name, course.fullName, course.color, semesterId);
 }
 
 function insertComponents(courseId: string, components: Component[]): Component[] {
@@ -269,21 +341,98 @@ function insertComponents(courseId: string, components: Component[]): Component[
 	});
 }
 
-const createCourseFromTemplate = db.transaction((template: Course) => {
-	const courseId = crypto.randomUUID();
-	insertCourse(courseId, template);
-	const components = insertComponents(courseId, template.components);
+function createCourseFromTemplateInSemester(template: Course, semesterId: string): Course {
+	return db.transaction(() => {
+		const courseId = crypto.randomUUID();
+		insertCourse(courseId, template, semesterId);
+		const components = insertComponents(courseId, template.components);
 
-	return {
-		id: courseId,
-		name: template.name,
-		fullName: template.fullName,
-		color: template.color,
-		components
-	};
-});
+		return {
+			id: courseId,
+			name: template.name,
+			fullName: template.fullName,
+			color: template.color,
+			components
+		};
+	})();
+}
 
-export async function seedByBranch(selectedCourses: Course[]): Promise<Course[]> {
+function getActiveSemesterId(): string | null {
+	const row = db
+		.prepare('SELECT id FROM semesters WHERE is_active = 1 ORDER BY created_at DESC LIMIT 1')
+		.get() as { id: string } | undefined;
+	return row?.id ?? null;
+}
+
+// ─── Semester functions ───────────────────────────────────────────────────────
+
+export function getAllSemesters(): SemesterMeta[] {
+	const rows = db
+		.prepare(
+			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active,
+			 COUNT(c.id) as course_count
+			 FROM semesters s
+			 LEFT JOIN courses c ON c.semester_id = s.id
+			 GROUP BY s.id
+			 ORDER BY s.created_at ASC`
+		)
+		.all() as SemesterRow[];
+	return rowsToSemesterMeta(rows);
+}
+
+export function createSemester(
+	id: string,
+	label: string,
+	branch: string,
+	semester: string
+): SemesterMeta {
+	db.transaction(() => {
+		db.prepare('UPDATE semesters SET is_active = 0').run();
+		db.prepare(
+			`INSERT INTO semesters (id, label, branch, semester, created_at, is_active)
+			 VALUES (?, ?, ?, ?, ?, 1)`
+		).run(id, label, branch, semester, Date.now());
+	})();
+
+	const row = db
+		.prepare(
+			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active,
+			 COUNT(c.id) as course_count
+			 FROM semesters s
+			 LEFT JOIN courses c ON c.semester_id = s.id
+			 WHERE s.id = ?
+			 GROUP BY s.id`
+		)
+		.get(id) as SemesterRow;
+
+	return rowsToSemesterMeta([row])[0];
+}
+
+export function setActiveSemester(id: string): void {
+	db.transaction(() => {
+		db.prepare('UPDATE semesters SET is_active = 0').run();
+		db.prepare('UPDATE semesters SET is_active = 1 WHERE id = ?').run(id);
+	})();
+}
+
+export function renameSemester(id: string, label: string): void {
+	db.prepare('UPDATE semesters SET label = ? WHERE id = ?').run(label, id);
+}
+
+export function deleteSemester(id: string): void {
+	db.transaction(() => {
+		// courses cascade-delete their components → sub_items via FK
+		db.prepare('DELETE FROM courses WHERE semester_id = ?').run(id);
+		db.prepare('DELETE FROM semesters WHERE id = ?').run(id);
+	})();
+}
+
+// ─── Course functions ─────────────────────────────────────────────────────────
+
+export async function seedByBranch(
+	selectedCourses: Course[],
+	semesterId: string
+): Promise<Course[]> {
 	const seeded: Course[] = [];
 
 	for (const selectedCourse of selectedCourses) {
@@ -291,75 +440,97 @@ export async function seedByBranch(selectedCourses: Course[]): Promise<Course[]>
 
 		if (defaultMatch && defaultMatch.components.length > 0) {
 			seeded.push(
-				createCourseFromTemplate({
-					...defaultMatch,
-					name: selectedCourse.name,
-					fullName: selectedCourse.fullName,
-					color: selectedCourse.color
-				})
+				createCourseFromTemplateInSemester(
+					{
+						...defaultMatch,
+						name: selectedCourse.name,
+						fullName: selectedCourse.fullName,
+						color: selectedCourse.color
+					},
+					semesterId
+				)
 			);
 			continue;
 		}
 
 		if (selectedCourse.components.length > 0) {
-			seeded.push(createCourseFromTemplate(selectedCourse));
+			seeded.push(createCourseFromTemplateInSemester(selectedCourse, semesterId));
 			continue;
 		}
 
 		seeded.push(
-			await addCourseWithDefaults(selectedCourse.name, selectedCourse.fullName, selectedCourse.color)
+			await addCourseWithDefaults(selectedCourse.name, selectedCourse.fullName, selectedCourse.color, semesterId)
 		);
 	}
 
 	return seeded;
 }
 
+export async function getCoursesBySemester(semesterId: string): Promise<Course[]> {
+	return fetchCoursesBySemester(semesterId);
+}
+
+/** Fallback for when no semesterId is provided — uses the active semester */
 export async function getAllCourses(): Promise<Course[]> {
-	return fetchAllCourses();
+	const activeSemId = getActiveSemesterId();
+	if (!activeSemId) return [];
+	return fetchCoursesBySemester(activeSemId);
 }
 
 export async function addCourseWithDefaults(
 	name: string,
 	fullName: string,
-	color: string
+	color: string,
+	semesterId?: string
 ): Promise<Course> {
-	return createCourseFromTemplate({
-		id: crypto.randomUUID(),
-		name,
-		fullName,
-		color,
-		components: [
-			{
-				id: crypto.randomUUID(),
-				name: 'Quiz',
-				weight: 0,
-				maxScore: 100,
-				score: null,
-				subItems: [
-					{ id: crypto.randomUUID(), name: 'Quiz 1', score: null, maxScore: 100 },
-					{ id: crypto.randomUUID(), name: 'Quiz 2', score: null, maxScore: 100 }
-				]
-			},
-			{
-				id: crypto.randomUUID(),
-				name: 'Midsem',
-				weight: 0,
-				maxScore: 100,
-				score: null
-			},
-			{
-				id: crypto.randomUUID(),
-				name: 'Endsem',
-				weight: 0,
-				maxScore: 100,
-				score: null
-			}
-		]
-	});
+	const semId = semesterId ?? getActiveSemesterId();
+	if (!semId) throw new Error('No active semester');
+
+	return createCourseFromTemplateInSemester(
+		{
+			id: crypto.randomUUID(),
+			name,
+			fullName,
+			color,
+			components: [
+				{
+					id: crypto.randomUUID(),
+					name: 'Quiz',
+					weight: 0,
+					maxScore: 100,
+					score: null,
+					subItems: [
+						{ id: crypto.randomUUID(), name: 'Quiz 1', score: null, maxScore: 100 },
+						{ id: crypto.randomUUID(), name: 'Quiz 2', score: null, maxScore: 100 }
+					]
+				},
+				{
+					id: crypto.randomUUID(),
+					name: 'Midsem',
+					weight: 0,
+					maxScore: 100,
+					score: null
+				},
+				{
+					id: crypto.randomUUID(),
+					name: 'Endsem',
+					weight: 0,
+					maxScore: 100,
+					score: null
+				}
+			]
+		},
+		semId
+	);
 }
 
-export async function addCourseWithComponents(template: Course): Promise<Course> {
-	return createCourseFromTemplate(template);
+export async function addCourseWithComponents(
+	template: Course,
+	semesterId?: string
+): Promise<Course> {
+	const semId = semesterId ?? getActiveSemesterId();
+	if (!semId) throw new Error('No active semester');
+	return createCourseFromTemplateInSemester(template, semId);
 }
 
 export async function deleteCourse(courseId: string): Promise<void> {
@@ -412,7 +583,8 @@ const SUB_COL_MAP: Record<string, string> = {
 	classAvg: 'class_avg',
 	classMedian: 'class_median',
 	classMax: 'class_max',
-	classStdDev: 'class_std_dev'
+	classStdDev: 'class_std_dev',
+	scaleTargetId: 'scale_target_id'
 };
 
 export async function updateSubItemField(id: string, field: string, value: unknown): Promise<void> {
