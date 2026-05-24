@@ -3,6 +3,7 @@ import {
 	getAllSemesters,
 	createSemester,
 	renameSemester,
+	reorderSemesters,
 	deleteSemester
 } from '$lib/server/db';
 import type { RequestHandler } from './$types';
@@ -22,7 +23,11 @@ export const POST: RequestHandler = async ({ request }) => {
 };
 
 export const PATCH: RequestHandler = async ({ request }) => {
-	const { id, label } = await request.json();
+	const { id, label, order } = await request.json();
+	if (Array.isArray(order)) {
+		reorderSemesters(order);
+		return json({ ok: true });
+	}
 	if (!id || !label) {
 		return json({ error: 'Missing fields' }, { status: 400 });
 	}

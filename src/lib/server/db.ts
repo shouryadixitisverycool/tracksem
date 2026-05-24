@@ -11,6 +11,7 @@ type SemesterRow = {
 	semester: string;
 	created_at: number;
 	is_active: number;
+	sort_order: number | null;
 	course_count: number;
 };
 
@@ -69,7 +70,8 @@ db.exec(`
 		branch TEXT NOT NULL,
 		semester TEXT NOT NULL,
 		created_at INTEGER NOT NULL,
-		is_active INTEGER NOT NULL DEFAULT 0
+		is_active INTEGER NOT NULL DEFAULT 0,
+		sort_order INTEGER NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS courses (
@@ -114,6 +116,24 @@ db.exec(`
 
 // ─── Column migrations ────────────────────────────────────────────────────────
 
+const semesterColumns = db.prepare('PRAGMA table_info(semesters)').all() as { name: string }[];
+if (!semesterColumns.some((column) => column.name === 'sort_order')) {
+	db.prepare('ALTER TABLE semesters ADD COLUMN sort_order INTEGER').run();
+}
+
+const semestersMissingOrder = db
+	.prepare('SELECT id FROM semesters WHERE sort_order IS NULL ORDER BY created_at ASC')
+	.all() as { id: string }[];
+
+if (semestersMissingOrder.length > 0) {
+	const updateSemesterSortOrder = db.prepare('UPDATE semesters SET sort_order = ? WHERE id = ?');
+	db.transaction(() => {
+		semestersMissingOrder.forEach((semester, index) => {
+			updateSemesterSortOrder.run(index, semester.id);
+		});
+	})();
+}
+
 const componentColumns = db.prepare('PRAGMA table_info(components)').all() as { name: string }[];
 if (!componentColumns.some((column) => column.name === 'scale_target_id')) {
 	db.prepare('ALTER TABLE components ADD COLUMN scale_target_id TEXT').run();
@@ -138,10 +158,11 @@ const orphanCount = (
 
 if (orphanCount > 0) {
 	const semId = crypto.randomUUID();
+	const nextSortOrder = getNextSemesterSortOrder();
 	db.prepare(
-		`INSERT INTO semesters (id, label, branch, semester, created_at, is_active)
-		 VALUES (?, ?, ?, ?, ?, 1)`
-	).run(semId, 'Semester 1', 'unknown', 'unknown', Date.now());
+		`INSERT INTO semesters (id, label, branch, semester, created_at, is_active, sort_order)
+		 VALUES (?, ?, ?, ?, ?, 1, ?)`
+	).run(semId, 'Semester 1', 'unknown', 'unknown', Date.now(), nextSortOrder);
 	db.prepare('UPDATE courses SET semester_id = ? WHERE semester_id IS NULL').run(semId);
 }
 
@@ -159,6 +180,13 @@ function rowsToSemesterMeta(rows: SemesterRow[]): SemesterMeta[] {
 		isActive: r.is_active === 1,
 		courseCount: r.course_count
 	}));
+}
+
+function getNextSemesterSortOrder(): number {
+	const row = db
+		.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 as next_order FROM semesters')
+		.get() as { next_order: number };
+	return row.next_order;
 }
 
 function fetchCoursesBySemester(semesterId: string): Course[] {
@@ -369,12 +397,12 @@ function getActiveSemesterId(): string | null {
 export function getAllSemesters(): SemesterMeta[] {
 	const rows = db
 		.prepare(
-			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active,
+			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active, s.sort_order,
 			 COUNT(c.id) as course_count
 			 FROM semesters s
 			 LEFT JOIN courses c ON c.semester_id = s.id
 			 GROUP BY s.id
-			 ORDER BY s.created_at ASC`
+			 ORDER BY s.sort_order IS NULL ASC, s.sort_order ASC, s.created_at ASC`
 		)
 		.all() as SemesterRow[];
 	return rowsToSemesterMeta(rows);
@@ -386,17 +414,18 @@ export function createSemester(
 	branch: string,
 	semester: string
 ): SemesterMeta {
+	const nextSortOrder = getNextSemesterSortOrder();
 	db.transaction(() => {
 		db.prepare('UPDATE semesters SET is_active = 0').run();
 		db.prepare(
-			`INSERT INTO semesters (id, label, branch, semester, created_at, is_active)
-			 VALUES (?, ?, ?, ?, ?, 1)`
-		).run(id, label, branch, semester, Date.now());
+			`INSERT INTO semesters (id, label, branch, semester, created_at, is_active, sort_order)
+			 VALUES (?, ?, ?, ?, ?, 1, ?)`
+		).run(id, label, branch, semester, Date.now(), nextSortOrder);
 	})();
 
 	const row = db
 		.prepare(
-			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active,
+			`SELECT s.id, s.label, s.branch, s.semester, s.created_at, s.is_active, s.sort_order,
 			 COUNT(c.id) as course_count
 			 FROM semesters s
 			 LEFT JOIN courses c ON c.semester_id = s.id
@@ -417,6 +446,28 @@ export function setActiveSemester(id: string): void {
 
 export function renameSemester(id: string, label: string): void {
 	db.prepare('UPDATE semesters SET label = ? WHERE id = ?').run(label, id);
+}
+
+export function reorderSemesters(ids: string[]): void {
+	const existingIds = (
+		db
+			.prepare(
+				'SELECT id FROM semesters ORDER BY sort_order IS NULL ASC, sort_order ASC, created_at ASC'
+			)
+			.all() as { id: string }[]
+	).map((row) => row.id);
+
+	const existingIdSet = new Set(existingIds);
+	const validIds = ids.filter((id) => existingIdSet.has(id));
+	const validIdSet = new Set(validIds);
+	const orderedIds = [...validIds, ...existingIds.filter((id) => !validIdSet.has(id))];
+	const updateSemesterSortOrder = db.prepare('UPDATE semesters SET sort_order = ? WHERE id = ?');
+
+	db.transaction(() => {
+		orderedIds.forEach((id, index) => {
+			updateSemesterSortOrder.run(index, id);
+		});
+	})();
 }
 
 export function deleteSemester(id: string): void {

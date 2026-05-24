@@ -229,6 +229,24 @@ class GradesStore {
         await api('/api/semesters', 'PATCH', { id, label });
     }
 
+    /** Reorder semesters in the switcher */
+    async reorderSemesters(ids: string[]): Promise<void> {
+        if (ids.length !== this.semesters.length) return;
+
+        const currentIds = this.semesters.map((semester) => semester.id);
+        if (currentIds.every((id, index) => id === ids[index])) return;
+
+        const semestersById = new Map(this.semesters.map((semester) => [semester.id, semester]));
+        const nextSemesters = ids
+            .map((id) => semestersById.get(id))
+            .filter((semester): semester is SemesterMeta => Boolean(semester));
+
+        if (nextSemesters.length !== this.semesters.length) return;
+
+        this.semesters = nextSemesters;
+        await api('/api/semesters', 'PATCH', { order: ids });
+    }
+
     /** Delete a semester and its courses */
     async deleteSemester(id: string): Promise<void> {
         await api('/api/semesters', 'DELETE', { id });

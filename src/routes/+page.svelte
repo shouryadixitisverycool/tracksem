@@ -107,20 +107,32 @@
         seeding = false;
     }
 
-    // ─── Semester switcher ───────────────────────────────────────────────────────
+	// ─── Semester switcher ───────────────────────────────────────────────────────
 
-    let switcherOpen = $state(false);
-    let renamingId = $state<string | null>(null);
-    let renameValue = $state("");
-    let deletingId = $state<string | null>(null);
+	type SemesterDropPlacement = 'before' | 'after';
 
-    function openSwitcher() { switcherOpen = true; }
-    function closeSwitcher() {
-        switcherOpen = false;
-        renamingId = null;
-        renameValue = "";
-        deletingId = null;
-    }
+	let switcherOpen = $state(false);
+	let renamingId = $state<string | null>(null);
+	let renameValue = $state("");
+	let deletingId = $state<string | null>(null);
+	let draggingSemesterId = $state<string | null>(null);
+	let dragOverSemesterId = $state<string | null>(null);
+	let dragPlacement = $state<SemesterDropPlacement>('before');
+
+	function openSwitcher() { switcherOpen = true; }
+	function clearSemesterDrag() {
+		draggingSemesterId = null;
+		dragOverSemesterId = null;
+		dragPlacement = 'before';
+	}
+
+	function closeSwitcher() {
+		switcherOpen = false;
+		renamingId = null;
+		renameValue = "";
+		deletingId = null;
+		clearSemesterDrag();
+	}
 
     async function handleSwitch(id: string) {
         if (id === grades.activeSemesterId) { closeSwitcher(); return; }
@@ -128,10 +140,10 @@
         closeSwitcher();
     }
 
-    function startRename(id: string, currentLabel: string) {
-        renamingId = id;
-        renameValue = currentLabel;
-    }
+	function startRename(id: string, currentLabel: string) {
+		renamingId = id;
+		renameValue = currentLabel;
+	}
 
     async function commitRename(id: string) {
         const label = renameValue.trim();
@@ -140,121 +152,211 @@
         renameValue = "";
     }
 
-    function startDelete(id: string) { deletingId = id; }
+	function startDelete(id: string) { deletingId = id; }
 
-    async function confirmDelete(id: string) {
-        await grades.deleteSemester(id);
-        deletingId = null;
-        closeSwitcher();
-    }
+	async function confirmDelete(id: string) {
+		await grades.deleteSemester(id);
+		deletingId = null;
+		closeSwitcher();
+	}
+
+	function handleSemesterDragStart(id: string, event: DragEvent) {
+		if (grades.semesters.length < 2 || renamingId || deletingId) {
+			event.preventDefault();
+			return;
+		}
+
+		draggingSemesterId = id;
+		dragOverSemesterId = null;
+		dragPlacement = 'before';
+
+		if (event.dataTransfer) {
+			event.dataTransfer.effectAllowed = 'move';
+			event.dataTransfer.dropEffect = 'move';
+			event.dataTransfer.setData('text/plain', id);
+		}
+	}
+
+	function handleSemesterDragOver(id: string, event: DragEvent) {
+		if (!draggingSemesterId || draggingSemesterId === id) return;
+
+		event.preventDefault();
+		dragOverSemesterId = id;
+
+		const row = event.currentTarget;
+		if (row instanceof HTMLElement) {
+			const rect = row.getBoundingClientRect();
+			dragPlacement = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+		}
+
+		if (event.dataTransfer) {
+			event.dataTransfer.dropEffect = 'move';
+		}
+	}
+
+	function getSemesterOrderAfterDrop(
+		draggedId: string,
+		targetId: string,
+		placement: SemesterDropPlacement
+	): string[] {
+		const orderedIds = grades.semesters.map((semester) => semester.id).filter((id) => id !== draggedId);
+		const targetIndex = orderedIds.indexOf(targetId);
+
+		if (targetIndex === -1) return grades.semesters.map((semester) => semester.id);
+
+		orderedIds.splice(placement === 'after' ? targetIndex + 1 : targetIndex, 0, draggedId);
+		return orderedIds;
+	}
+
+	async function handleSemesterDrop(id: string, event: DragEvent) {
+		event.preventDefault();
+
+		const draggedId = draggingSemesterId;
+		const placement = dragPlacement;
+		clearSemesterDrag();
+
+		if (!draggedId || draggedId === id) return;
+
+		await grades.reorderSemesters(getSemesterOrderAfterDrop(draggedId, id, placement));
+	}
 </script>
 
 <div class="page">
     <!-- Header -->
-    <header class="header">
-        <div class="header-inner">
-            <div class="brand">
-                <div class="brand-icon mono">&gt;_</div>
-                <div>
-                    <div class="brand-title mono">tracksem</div>
-                    <div class="brand-sub">
-                        sem 2 · {new Date().getFullYear()}
-                    </div>
-                </div>
-            </div>
+	<header class="header">
+		<div class="header-inner">
+			<div class="header-left">
+				<div class="brand">
+					<div class="brand-icon mono">&gt;_</div>
+					<div>
+						<div class="brand-title mono">tracksem</div>
+						<div class="brand-sub">
+							sem 2 · {new Date().getFullYear()}
+						</div>
+					</div>
+				</div>
 
-            <!-- Semester switcher -->
-            {#if grades.semesters.length > 0}
-                <div class="sem-switcher">
-                    <button class="sem-trigger mono" onclick={openSwitcher}>
-                        <span class="sem-dot active-dot"></span>
-                        <span class="sem-label">{grades.activeSemester?.label ?? "—"}</span>
-                        <span class="sem-chevron">▾</span>
-                    </button>
+				<!-- Semester switcher -->
+				{#if grades.semesters.length > 0}
+					<div class="sem-switcher">
+						<button class="sem-trigger mono" onclick={openSwitcher}>
+							<span class="sem-dot active-dot"></span>
+							<span class="sem-label">{grades.activeSemester?.label ?? "—"}</span>
+							<span class="sem-chevron">▾</span>
+						</button>
 
-                    {#if switcherOpen}
-                        <button
-                            class="switcher-backdrop"
-                            type="button"
-                            onclick={closeSwitcher}
-                            aria-label="Close semester switcher"
-                        ></button>
-                        <div class="sem-dropdown" role="menu">
-                            <div class="sem-dropdown-label mono">// semesters</div>
-                            {#each grades.semesters as sem (sem.id)}
-                                <div
-                                    class="sem-row"
-                                    class:active={sem.id === grades.activeSemesterId}
-                                >
-                                    {#if renamingId === sem.id}
-                                        <input
-                                            class="sem-rename-input mono"
-                                            bind:value={renameValue}
-                                            onkeydown={(e) => {
-                                                if (e.key === 'Enter') commitRename(sem.id);
-                                                if (e.key === 'Escape') { renamingId = null; }
-                                            }}
-                                            onclick={(e) => e.stopPropagation()}
-                                        />
-                                        <button
-                                            class="sem-action-btn mono"
-                                            onclick={(e) => { e.stopPropagation(); commitRename(sem.id); }}
-                                        >✓</button>
-                                        <button
-                                            class="sem-action-btn mono"
-                                            onclick={(e) => { e.stopPropagation(); renamingId = null; }}
-                                        >✕</button>
-                                    {:else if deletingId === sem.id}
-                                        <span class="sem-delete-confirm mono">delete "{sem.label}"?</span>
-                                        <button
-                                            class="sem-action-btn danger mono"
-                                            onclick={(e) => { e.stopPropagation(); confirmDelete(sem.id); }}
-                                        >yes</button>
-                                        <button
-                                            class="sem-action-btn mono"
-                                            onclick={(e) => { e.stopPropagation(); deletingId = null; }}
-                                        >no</button>
-                                    {:else}
-                                        <button
-                                            class="sem-switch-btn"
-                                            onclick={() => handleSwitch(sem.id)}
-                                            role="menuitem"
-                                        >
-                                            <span class="sem-indicator">
-                                                {sem.id === grades.activeSemesterId ? "●" : "○"}
-                                            </span>
-                                            <span class="sem-name mono">{sem.label}</span>
-                                            <span class="sem-count mono">{sem.courseCount} courses</span>
-                                        </button>
-                                        <button
-                                            class="sem-icon-btn mono"
-                                            title="rename"
-                                            onclick={(e) => { e.stopPropagation(); startRename(sem.id, sem.label); }}
-                                        >✎</button>
-                                        {#if grades.semesters.length > 1}
-                                            <button
-                                                class="sem-icon-btn danger mono"
-                                                title="delete"
-                                                onclick={(e) => { e.stopPropagation(); startDelete(sem.id); }}
-                                            >✕</button>
-                                        {/if}
-                                    {/if}
-                                </div>
-                            {/each}
-                            <div class="sem-divider"></div>
-                            <button
-                                class="sem-new-btn mono"
-                                onclick={() => { closeSwitcher(); goto('/new-semester'); }}
-                                role="menuitem"
-                            >
-                                + new semester
-                            </button>
-                        </div>
-                    {/if}
-                </div>
-            {/if}
+						{#if switcherOpen}
+							<button
+								class="switcher-backdrop"
+								type="button"
+								onclick={closeSwitcher}
+								aria-label="Close semester switcher"
+							></button>
+							<div class="sem-dropdown" role="menu">
+								<div class="sem-dropdown-label mono">// semesters</div>
+								{#each grades.semesters as sem (sem.id)}
+									<div
+										class="sem-row"
+										role="group"
+										class:active={sem.id === grades.activeSemesterId}
+										class:dragging={draggingSemesterId === sem.id}
+										class:drag-over-before={dragOverSemesterId === sem.id && dragPlacement === 'before'}
+										class:drag-over-after={dragOverSemesterId === sem.id && dragPlacement === 'after'}
+										ondragover={(event) => handleSemesterDragOver(sem.id, event)}
+										ondrop={(event) => handleSemesterDrop(sem.id, event)}
+									>
+										{#if renamingId === sem.id}
+											<span class="sem-drag-spacer" aria-hidden="true"></span>
+											<input
+												class="sem-rename-input mono"
+												bind:value={renameValue}
+												onkeydown={(e) => {
+													if (e.key === 'Enter') commitRename(sem.id);
+													if (e.key === 'Escape') { renamingId = null; }
+												}}
+												onclick={(e) => e.stopPropagation()}
+											/>
+											<button
+												class="sem-action-btn mono"
+												onclick={(e) => { e.stopPropagation(); commitRename(sem.id); }}
+											>✓</button>
+											<button
+												class="sem-action-btn mono"
+												onclick={(e) => { e.stopPropagation(); renamingId = null; }}
+											>✕</button>
+										{:else if deletingId === sem.id}
+											<span class="sem-drag-spacer" aria-hidden="true"></span>
+											<span class="sem-delete-confirm mono">delete "{sem.label}"?</span>
+											<button
+												class="sem-action-btn danger mono"
+												onclick={(e) => { e.stopPropagation(); confirmDelete(sem.id); }}
+											>yes</button>
+											<button
+												class="sem-action-btn mono"
+												onclick={(e) => { e.stopPropagation(); deletingId = null; }}
+											>no</button>
+										{:else}
+											<button
+												class="sem-drag-handle"
+												type="button"
+												title="drag to reorder"
+												aria-label={`Reorder ${sem.label}`}
+												draggable={grades.semesters.length > 1}
+												disabled={grades.semesters.length < 2}
+												onclick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+												ondragstart={(event) => handleSemesterDragStart(sem.id, event)}
+												ondragend={clearSemesterDrag}
+											>
+												<svg class="sem-drag-icon" viewBox="0 0 8 12" aria-hidden="true">
+													<circle cx="2" cy="2" r="1"></circle>
+													<circle cx="6" cy="2" r="1"></circle>
+													<circle cx="2" cy="6" r="1"></circle>
+													<circle cx="6" cy="6" r="1"></circle>
+													<circle cx="2" cy="10" r="1"></circle>
+													<circle cx="6" cy="10" r="1"></circle>
+												</svg>
+											</button>
+											<button
+												class="sem-switch-btn"
+												onclick={() => handleSwitch(sem.id)}
+												role="menuitem"
+											>
+												<span class="sem-indicator">
+													{sem.id === grades.activeSemesterId ? "●" : "○"}
+												</span>
+												<span class="sem-name mono">{sem.label}</span>
+												<span class="sem-count mono">{sem.courseCount} courses</span>
+											</button>
+											<button
+												class="sem-icon-btn mono"
+												title="rename"
+												onclick={(e) => { e.stopPropagation(); startRename(sem.id, sem.label); }}
+											>✎</button>
+											{#if grades.semesters.length > 1}
+												<button
+													class="sem-icon-btn danger mono"
+													title="delete"
+													onclick={(e) => { e.stopPropagation(); startDelete(sem.id); }}
+												>✕</button>
+											{/if}
+										{/if}
+									</div>
+								{/each}
+								<div class="sem-divider"></div>
+								<button
+									class="sem-new-btn mono"
+									onclick={() => { closeSwitcher(); goto('/new-semester'); }}
+									role="menuitem"
+								>
+									+ new semester
+								</button>
+							</div>
+						{/if}
+					</div>
+				{/if}
+			</div>
 
-            <div class="header-right">
+			<div class="header-right">
                 {#if overall.grade !== null}
                     <div
                         class="overall-pill"
@@ -514,14 +616,21 @@
         z-index: 50;
     }
 
-    .header-inner {
-        max-width: 1200px;
-        margin: 0 auto;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 1rem;
-    }
+	.header-inner {
+		max-width: 1200px;
+		margin: 0 auto;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		gap: 1rem;
+	}
+
+	.header-left {
+		display: flex;
+		align-items: center;
+		gap: 1.25rem;
+		min-width: 0;
+	}
 
     .brand {
         display: flex;
@@ -587,12 +696,12 @@
 
     /* ── Semester switcher ──────────────────────── */
 
-    .sem-switcher {
-        position: relative;
-        flex: 1;
-        min-width: 0;
-        max-width: 240px;
-    }
+	.sem-switcher {
+		position: relative;
+		min-width: 0;
+		width: 240px;
+		flex-shrink: 0;
+	}
 
     .sem-trigger {
         display: flex;
@@ -672,19 +781,73 @@
         padding: 0.3rem 0.75rem 0.5rem;
     }
 
-    .sem-row {
-        display: flex;
-        align-items: center;
-        gap: 0.25rem;
-        padding: 0 0.4rem;
-    }
+	.sem-row {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		padding: 0 0.4rem;
+	}
 
-    .sem-row.active .sem-switch-btn {
-        color: oklch(0.9 0.01 265);
-    }
+	.sem-row.dragging {
+		opacity: 0.55;
+	}
 
-    .sem-switch-btn {
-        flex: 1;
+	.sem-row.drag-over-before {
+		box-shadow: inset 0 1px 0 #22d3ee88;
+	}
+
+	.sem-row.drag-over-after {
+		box-shadow: inset 0 -1px 0 #22d3ee88;
+	}
+
+	.sem-row.active .sem-switch-btn {
+		color: oklch(0.9 0.01 265);
+	}
+
+	.sem-drag-handle,
+	.sem-drag-spacer {
+		width: 1.35rem;
+		height: 1.75rem;
+		display: block;
+		flex-shrink: 0;
+	}
+
+	.sem-drag-handle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: transparent;
+		border: none;
+		border-radius: 5px;
+		padding: 0;
+		color: oklch(0.35 0.02 265);
+		cursor: grab;
+		transition: color 0.12s ease, background 0.12s ease;
+	}
+
+	.sem-drag-handle:hover:not(:disabled) {
+		color: oklch(0.7 0.02 265);
+		background: oklch(1 0 0 / 5%);
+	}
+
+	.sem-row.dragging .sem-drag-handle {
+		cursor: grabbing;
+		color: #22d3ee;
+	}
+
+	.sem-drag-handle:disabled {
+		opacity: 0.35;
+		cursor: default;
+	}
+
+	.sem-drag-icon {
+		width: 8px;
+		height: 12px;
+		fill: currentColor;
+	}
+
+	.sem-switch-btn {
+		flex: 1;
         display: flex;
         align-items: center;
         gap: 0.45rem;
@@ -1324,10 +1487,10 @@
         .modal-card {
             width: 100%;
         }
-        .sem-switcher {
-            max-width: 160px;
-        }
-    }
+		.sem-switcher {
+			width: 180px;
+		}
+	}
 
     /* ── Extra-small ≤ 480px ─────────────────── */
     @media (max-width: 480px) {
