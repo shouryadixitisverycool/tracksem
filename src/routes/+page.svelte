@@ -2,12 +2,16 @@
     import { goto } from "$app/navigation";
     import { grades } from "$lib/stores/grades.svelte";
     import CourseCard from "$lib/components/CourseCard.svelte";
-    import { BRANCHES, getSemesters, getCourses } from "$lib/data/courses";
+    import SaveStatus from "$lib/components/SaveStatus.svelte";
+    import { getGpaColor, getGradeColor } from "$lib/grading";
+    import { absoluteGrade, computeGpa, curvedLetter, gradeForGpa, type GpaBasis } from "$lib/gpa";
 
+    /** Unweighted average of visible absolute grades */
     function getOverallGrade(): { grade: number | null; count: number } {
         let total = 0;
         let count = 0;
         for (const course of grades.courses) {
+            if (course.hideAbsoluteGrade) continue;
             const proj = grades.projectedGrade(course.id);
             if (proj.grade !== null) {
                 total += proj.grade;
@@ -20,13 +24,64 @@
 
     const overall = $derived(getOverallGrade());
 
-    function gradeColor(g: number | null): string {
-        if (g === null) return "#6b7280";
-        if (g >= 90) return "#4ade80";
-        if (g >= 80) return "#86efac";
-        if (g >= 65) return "#fbbf24";
-        if (g >= 50) return "#fb923c";
-        return "#f87171";
+    // ─── SGPA / CGPA ─────────────────────────────────────────────────────────────
+
+    const GPA_BASIS_KEY = "tracksem:gpaBasis";
+    let gpaBasis = $state<GpaBasis>(
+        typeof localStorage !== "undefined" && localStorage.getItem(GPA_BASIS_KEY) === "absolute" ? "absolute" : "curved"
+    );
+
+    function toggleGpaBasis() {
+        gpaBasis = gpaBasis === "curved" ? "absolute" : "curved";
+        localStorage.setItem(GPA_BASIS_KEY, gpaBasis);
+    }
+
+    const activeGpaEntries = $derived(
+        grades.courses.map((course) => ({
+            credits: course.credits,
+            letter: gradeForGpa(
+                course,
+                gpaBasis,
+                grades.projectedGrade(course.id).grade,
+                grades.curvedGrade(course.id)?.letter ?? null
+            ).letter
+        }))
+    );
+    const sgpa = $derived(computeGpa(activeGpaEntries));
+    const cgpa = $derived(
+        computeGpa([
+            ...activeGpaEntries,
+            ...grades.allCourses
+                .filter((course) => course.semesterId !== grades.activeSemesterId)
+                .map((course) => ({
+                    credits: course.credits,
+                    letter: gradeForGpa(course, gpaBasis, absoluteGrade(course), curvedLetter(course)).letter
+                }))
+        ])
+    );
+
+    // ─── Export / import ─────────────────────────────────────────────────────────
+
+    let dataMenuOpen = $state(false);
+    let importing = $state(false);
+    let dataMessage = $state<{ text: string; error: boolean } | null>(null);
+
+    async function handleImport(event: Event) {
+        const input = event.currentTarget as HTMLInputElement;
+        const file = input.files?.[0];
+        input.value = "";
+        if (!file) return;
+        importing = true;
+        dataMessage = null;
+        try {
+            const count = await grades.importData(await file.text());
+            dataMessage = { text: `imported ${count} semester${count === 1 ? "" : "s"} — find them in the semester switcher`, error: false };
+        } catch (error) {
+            dataMessage = { text: error instanceof Error ? error.message : "import failed", error: true };
+        } finally {
+            importing = false;
+            dataMenuOpen = false;
+        }
     }
 
     const courseColors = [
@@ -62,49 +117,45 @@
         newCourseColor = pickRandomColor();
     }
 
+    let addError = $state<string | null>(null);
+
     async function handleAddCourse() {
         const name = newCourseName.trim();
         if (!name || creatingCourse) return;
         const fullName = newCourseFullName.trim() || name;
         creatingCourse = true;
-        await grades.addCourse(name, fullName, newCourseColor || pickRandomColor());
-        creatingCourse = false;
-        closeAddCourse();
+        addError = null;
+        try {
+            await grades.addCourse(name, fullName, newCourseColor || pickRandomColor());
+            closeAddCourse();
+        } catch (error) {
+            addError = error instanceof Error ? error.message : "could not add the course";
+        } finally {
+            creatingCourse = false;
+        }
     }
 
-    // ─── Onboarding state (first-time / empty semester) ─────────────────────────
+    // ─── Onboarding (no semesters yet → /new-semester) ───────────────────────────
 
-    let selectedBranch = $state("");
-    let selectedSemester = $state("");
+    $effect(() => {
+        if (grades.loaded && grades.semesters.length === 0) goto("/new-semester");
+    });
+
     let seeding = $state(false);
+    let seedError = $state<string | null>(null);
 
-    // ─── Encryption key state ────────────────────────────────────────────────────
-
-    function generateKey(): string {
-        const bytes = new Uint8Array(16);
-        crypto.getRandomValues(bytes);
-        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-
-    let useCustomKey = $state(false);
-    let defaultKey = $state(generateKey());
-    let customKey = $state("");
-    const activeKey = $derived(useCustomKey ? customKey : defaultKey);
-
-    const availableSemesters = $derived(
-        selectedBranch ? getSemesters(selectedBranch) : []
-    );
-    const previewCourses = $derived(
-        selectedBranch && selectedSemester
-            ? getCourses(selectedBranch, selectedSemester)
-            : []
-    );
-
-    async function handleSeed() {
-        if (!selectedBranch || !selectedSemester || seeding) return;
+    async function handleReseed() {
+        const s = grades.activeSemester;
+        if (!s || s.branch === "unknown" || seeding) return;
         seeding = true;
-        await grades.seedFromCatalog(selectedBranch, selectedSemester);
-        seeding = false;
+        seedError = null;
+        try {
+            await grades.seedFromCatalog(s.branch, s.semester);
+        } catch (error) {
+            seedError = error instanceof Error ? error.message : "seeding failed";
+        } finally {
+            seeding = false;
+        }
     }
 
 	// ─── Semester switcher ───────────────────────────────────────────────────────
@@ -134,10 +185,17 @@
 		clearSemesterDrag();
 	}
 
+    let switcherError = $state<string | null>(null);
+
     async function handleSwitch(id: string) {
         if (id === grades.activeSemesterId) { closeSwitcher(); return; }
-        await grades.switchSemester(id);
-        closeSwitcher();
+        switcherError = null;
+        try {
+            await grades.switchSemester(id);
+            closeSwitcher();
+        } catch (error) {
+            switcherError = error instanceof Error ? error.message : "could not switch semester";
+        }
     }
 
 	function startRename(id: string, currentLabel: string) {
@@ -145,9 +203,9 @@
 		renameValue = currentLabel;
 	}
 
-    async function commitRename(id: string) {
-        const label = renameValue.trim();
-        if (label) await grades.renameSemester(id, label);
+    function commitRename(id: string) {
+        const label = renameValue.trim().slice(0, 100);
+        if (label) grades.renameSemester(id, label);
         renamingId = null;
         renameValue = "";
     }
@@ -155,9 +213,14 @@
 	function startDelete(id: string) { deletingId = id; }
 
 	async function confirmDelete(id: string) {
-		await grades.deleteSemester(id);
-		deletingId = null;
-		closeSwitcher();
+		switcherError = null;
+		try {
+			await grades.deleteSemester(id);
+			deletingId = null;
+			closeSwitcher();
+		} catch (error) {
+			switcherError = error instanceof Error ? error.message : "could not delete semester";
+		}
 	}
 
 	function handleSemesterDragStart(id: string, event: DragEvent) {
@@ -217,7 +280,7 @@
 
 		if (!draggedId || draggedId === id) return;
 
-		await grades.reorderSemesters(getSemesterOrderAfterDrop(draggedId, id, placement));
+		grades.reorderSemesters(getSemesterOrderAfterDrop(draggedId, id, placement));
 	}
 </script>
 
@@ -231,7 +294,7 @@
 					<div>
 						<div class="brand-title mono">tracksem</div>
 						<div class="brand-sub">
-							sem 2 · {new Date().getFullYear()}
+							{grades.activeSemester?.label ?? "no semester yet"}
 						</div>
 					</div>
 				</div>
@@ -342,6 +405,9 @@
 										{/if}
 									</div>
 								{/each}
+								{#if switcherError}
+									<div class="sem-error mono" role="alert">{switcherError}</div>
+								{/if}
 								<div class="sem-divider"></div>
 								<button
 									class="sem-new-btn mono"
@@ -357,143 +423,102 @@
 			</div>
 
 			<div class="header-right">
-                {#if overall.grade !== null}
+                <SaveStatus />
+
+                {#if sgpa.gpa !== null}
                     <div
                         class="overall-pill"
-                        style="border-color: {gradeColor(overall.grade)}40; color: {gradeColor(overall.grade)}"
+                        style="border-color: {getGpaColor(sgpa.gpa)}40; color: {getGpaColor(sgpa.gpa)}"
+                        title="{sgpa.counted} of {sgpa.total} courses · {sgpa.credits} credits (official grade, else predicted {gpaBasis} letter)"
                     >
-                        <span class="mono text-sm">avg {overall.grade.toFixed(1)}%</span>
+                        <span class="mono text-xs" style="opacity: 0.6">SGPA</span>
+                        <span class="mono text-sm">{sgpa.gpa.toFixed(2)}</span>
+                    </div>
+                {/if}
+                {#if cgpa.gpa !== null}
+                    <div
+                        class="overall-pill"
+                        style="border-color: {getGpaColor(cgpa.gpa)}40; color: {getGpaColor(cgpa.gpa)}"
+                        title="{cgpa.counted} of {cgpa.total} courses across all semesters · {cgpa.credits} credits"
+                    >
+                        <span class="mono text-xs" style="opacity: 0.6">CGPA</span>
+                        <span class="mono text-sm">{cgpa.gpa.toFixed(2)}</span>
+                    </div>
+                {/if}
+                {#if sgpa.gpa !== null || cgpa.gpa !== null}
+                    <button
+                        class="basis-toggle mono"
+                        onclick={toggleGpaBasis}
+                        title="Letter used for SGPA/CGPA when no official grade is set (falls back to the other when unavailable)"
+                        aria-label="GPA uses {gpaBasis} predicted grades; switch"
+                    >
+                        {gpaBasis}
+                    </button>
+                {/if}
+
+                {#if overall.grade !== null}
+                    <div
+                        class="overall-pill subtle"
+                        style="border-color: {getGradeColor(overall.grade)}40; color: {getGradeColor(overall.grade)}"
+                        title="unweighted average of visible absolute grades"
+                    >
+                        <span class="mono text-xs">avg {overall.grade.toFixed(1)}%</span>
                         <span class="mono text-xs" style="opacity: 0.6">
                             across {overall.count} course{overall.count > 1 ? "s" : ""}
                         </span>
                     </div>
                 {/if}
 
-                <div class="user-group">
-                    <span class="user-email mono">local sqlite</span>
+                <div class="data-menu">
+                    <button
+                        class="data-trigger mono"
+                        aria-haspopup="menu"
+                        aria-expanded={dataMenuOpen}
+                        onclick={() => (dataMenuOpen = !dataMenuOpen)}
+                    >
+                        data ▾
+                    </button>
+                    {#if dataMenuOpen}
+                        <button
+                            class="switcher-backdrop"
+                            type="button"
+                            onclick={() => (dataMenuOpen = false)}
+                            aria-label="Close data menu"
+                        ></button>
+                        <div class="data-dropdown">
+                            <a class="data-item mono" href="/api/export" download onclick={() => (dataMenuOpen = false)}
+                                >export JSON</a
+                            >
+                            <a class="data-item mono" href="/api/export/db" download onclick={() => (dataMenuOpen = false)}
+                                >download database backup</a
+                            >
+                            <label class="data-item mono">
+                                {importing ? "importing…" : "import JSON (as new semesters)"}
+                                <input
+                                    class="visually-hidden"
+                                    type="file"
+                                    accept="application/json,.json"
+                                    disabled={importing}
+                                    onchange={handleImport}
+                                />
+                            </label>
+                        </div>
+                    {/if}
                 </div>
             </div>
         </div>
+        {#if dataMessage}
+            <div class="data-message mono" class:error={dataMessage.error} role="status">
+                {dataMessage.text}
+                <button class="data-dismiss" aria-label="dismiss" onclick={() => (dataMessage = null)}>×</button>
+            </div>
+        {/if}
     </header>
 
     <!-- Course grid -->
     <main class="main">
         {#if grades.semesters.length === 0}
-            <!-- First-time onboarding — no semesters yet, redirect to /new-semester -->
-            <div class="onboard-wrap">
-                <div class="onboard-card">
-                    <div class="onboard-header mono">// setup</div>
-                    <div class="onboard-sub">
-                        select your branch and semester to get started
-                    </div>
-
-                    <!-- Encryption key -->
-                    <div class="enc-block">
-                        <div class="enc-label-row">
-                            <span class="enc-label mono">// encryption key</span>
-                            <div class="enc-toggle">
-                                <button
-                                    class="enc-tab mono"
-                                    class:active={!useCustomKey}
-                                    onclick={() => { useCustomKey = false; }}
-                                >default</button>
-                                <button
-                                    class="enc-tab mono"
-                                    class:active={useCustomKey}
-                                    onclick={() => { useCustomKey = true; }}
-                                >custom</button>
-                            </div>
-                        </div>
-
-                        {#if !useCustomKey}
-                            <div class="enc-key-row">
-                                <span class="enc-key mono">{defaultKey}</span>
-                                <button
-                                    class="enc-regen mono"
-                                    title="regenerate"
-                                    onclick={() => { defaultKey = generateKey(); }}
-                                >↺</button>
-                            </div>
-                            <div class="enc-hint mono">
-                                a random key has been generated for you — your data is encrypted before leaving your device
-                            </div>
-                        {:else}
-                            <input
-                                class="enc-input mono"
-                                type="text"
-                                placeholder="enter your own key (min 8 chars)"
-                                bind:value={customKey}
-                                spellcheck="false"
-                                autocomplete="off"
-                            />
-                            <div class="enc-hint mono">
-                                use your own passphrase — only you can decrypt your data
-                            </div>
-                        {/if}
-                    </div>
-
-                    <select
-                        class="onboard-select mono"
-                        bind:value={selectedBranch}
-                        onchange={() => { selectedSemester = ""; }}
-                    >
-                        <option value="">select branch</option>
-                        {#each BRANCHES as branch}
-                            <option value={branch}>{branch}</option>
-                        {/each}
-                    </select>
-
-                    {#if selectedBranch}
-                        <select
-                            class="onboard-select mono"
-                            bind:value={selectedSemester}
-                        >
-                            <option value="">select semester</option>
-                            {#each availableSemesters as sem}
-                                <option value={sem}>{sem}</option>
-                            {/each}
-                        </select>
-                    {/if}
-
-                    {#if previewCourses.length > 0}
-                        <div class="onboard-preview">
-                            <div class="onboard-preview-label mono">// courses to add</div>
-                            {#each previewCourses as c}
-                                <div class="onboard-preview-item">
-                                    <span
-                                        class="onboard-dot"
-                                        style="background: {c.color}"
-                                    ></span>
-                                    <span class="mono">{c.name}</span>
-                                    <span class="onboard-full">{c.fullName}</span>
-                                    {#if c.components.length > 0}
-                                        <span class="onboard-comp-count mono">
-                                            {c.components.length} components
-                                        </span>
-                                    {:else}
-                                        <span class="onboard-comp-count mono">defaults</span>
-                                    {/if}
-                                </div>
-                            {/each}
-                        </div>
-
-                        <button
-                            class="onboard-btn mono"
-                            disabled={seeding}
-                            onclick={async () => {
-                                if (!selectedBranch || !selectedSemester || seeding) return;
-                                seeding = true;
-                                const label = `${selectedBranch} · ${selectedSemester}`;
-                                await grades.createSemester(label, selectedBranch, selectedSemester);
-                                await grades.seedFromCatalog(selectedBranch, selectedSemester);
-                                seeding = false;
-                            }}
-                        >
-                            {seeding ? "setting up..." : "confirm"}
-                        </button>
-                    {/if}
-                </div>
-            </div>
+            <div class="section-label mono">redirecting to semester setup…</div>
         {:else if grades.courses.length === 0}
             <!-- Semester exists but no courses -->
             <div class="onboard-wrap">
@@ -508,19 +533,18 @@
                     >
                         + set up a new semester
                     </button>
-                    <button
-                        class="onboard-btn-secondary mono"
-                        disabled={seeding}
-                        onclick={async () => {
-                            const s = grades.activeSemester;
-                            if (!s || s.branch === 'unknown' || seeding) return;
-                            seeding = true;
-                            await grades.seedFromCatalog(s.branch, s.semester);
-                            seeding = false;
-                        }}
-                    >
-                        {seeding ? "seeding..." : "re-seed from catalog"}
-                    </button>
+                    {#if grades.activeSemester && grades.activeSemester.branch !== "unknown"}
+                        <button
+                            class="onboard-btn-secondary mono"
+                            disabled={seeding}
+                            onclick={handleReseed}
+                        >
+                            {seeding ? "seeding..." : "re-seed from catalog"}
+                        </button>
+                    {/if}
+                    {#if seedError}
+                        <div class="add-hint mono" style="color: #f87171" role="alert">{seedError}</div>
+                    {/if}
                 </div>
             </div>
         {:else}
@@ -584,6 +608,9 @@
                             cancel
                         </button>
                     </div>
+                    {#if addError}
+                        <div class="add-hint mono text-xs" style="color: #f87171" role="alert">{addError}</div>
+                    {/if}
                     <div class="add-hint mono text-xs">
                         defaults: Quiz x2 · Midsem · Endsem
                     </div>
@@ -676,22 +703,111 @@
         flex-shrink: 0;
     }
 
-    .user-group {
+    .overall-pill.subtle {
+        padding: 0.3rem 0.7rem;
+        opacity: 0.85;
+    }
+
+    .basis-toggle {
+        background: oklch(1 0 0 / 4%);
+        border: 1px solid oklch(1 0 0 / 10%);
+        border-radius: 6px;
+        padding: 0.3rem 0.55rem;
+        color: oklch(0.6 0.02 265);
+        font-size: 0.62rem;
+        cursor: pointer;
+        letter-spacing: 0.04em;
+    }
+
+    .basis-toggle:hover {
+        color: oklch(0.9 0.01 265);
+        border-color: oklch(1 0 0 / 18%);
+    }
+
+    .data-menu {
+        position: relative;
+    }
+
+    .data-trigger {
+        background: oklch(1 0 0 / 4%);
+        border: 1px solid oklch(1 0 0 / 10%);
+        border-radius: 6px;
+        padding: 0.35rem 0.6rem;
+        color: oklch(0.7 0.02 265);
+        font-size: 0.68rem;
+        cursor: pointer;
+    }
+
+    .data-trigger:hover {
+        color: oklch(0.9 0.01 265);
+        border-color: oklch(1 0 0 / 18%);
+    }
+
+    .data-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 230px;
+        background: oklch(0.13 0.02 265);
+        border: 1px solid oklch(1 0 0 / 14%);
+        border-radius: 8px;
+        box-shadow: 0 12px 40px oklch(0 0 0 / 50%);
+        z-index: 60;
+        padding: 0.35rem 0;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .data-item {
+        display: block;
+        padding: 0.5rem 0.8rem;
+        font-size: 0.7rem;
+        color: oklch(0.7 0.02 265);
+        text-decoration: none;
+        cursor: pointer;
+    }
+
+    .data-item:hover,
+    .data-item:focus-within {
+        background: oklch(1 0 0 / 5%);
+        color: #22d3ee;
+    }
+
+    .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+
+    .data-message {
+        max-width: 1200px;
+        margin: 0.6rem auto 0;
         display: flex;
         align-items: center;
         gap: 0.5rem;
-        min-width: 0;
-        padding-left: 0.75rem;
-        border-left: 1px solid oklch(1 0 0 / 8%);
+        font-size: 0.68rem;
+        color: #4ade80;
     }
 
-    .user-email {
-        font-size: 0.68rem;
-        color: oklch(0.38 0.02 265);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 180px;
+    .data-message.error {
+        color: #f87171;
+    }
+
+    .data-dismiss {
+        background: none;
+        border: none;
+        color: inherit;
+        cursor: pointer;
+        font-size: 0.85rem;
+    }
+
+    .sem-error {
+        font-size: 0.65rem;
+        color: #f87171;
+        padding: 0.3rem 0.75rem;
     }
 
     /* ── Semester switcher ──────────────────────── */
@@ -1180,125 +1296,6 @@
         margin-top: 2rem;
     }
 
-    /* ── Encryption key field ────────────────────── */
-
-    .enc-block {
-        background: oklch(1 0 0 / 3%);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 8px;
-        padding: 0.65rem 0.75rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-
-    .enc-label-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-    }
-
-    .enc-label {
-        font-size: 0.62rem;
-        color: oklch(0.4 0.02 265);
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-    }
-
-    .enc-toggle {
-        display: flex;
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 2px;
-        gap: 2px;
-    }
-
-    .enc-tab {
-        font-size: 0.6rem;
-        padding: 0.15rem 0.5rem;
-        background: transparent;
-        border: none;
-        border-radius: 3px;
-        color: oklch(0.42 0.02 265);
-        cursor: pointer;
-        transition: all 0.15s ease;
-        letter-spacing: 0.03em;
-    }
-
-    .enc-tab:hover {
-        color: oklch(0.7 0.02 265);
-    }
-
-    .enc-tab.active {
-        background: oklch(0.16 0.02 265);
-        color: #22d3ee;
-        border: 1px solid oklch(1 0 0 / 8%);
-    }
-
-    .enc-key-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 0.3rem 0.5rem;
-    }
-
-    .enc-key {
-        flex: 1;
-        font-size: 0.68rem;
-        color: #22d3ee;
-        letter-spacing: 0.06em;
-        word-break: break-all;
-        user-select: all;
-    }
-
-    .enc-regen {
-        background: none;
-        border: none;
-        color: oklch(0.45 0.02 265);
-        font-size: 0.85rem;
-        cursor: pointer;
-        padding: 0.1rem 0.2rem;
-        border-radius: 3px;
-        line-height: 1;
-        flex-shrink: 0;
-        transition: color 0.15s ease;
-    }
-
-    .enc-regen:hover {
-        color: oklch(0.8 0.02 265);
-    }
-
-    .enc-input {
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 0.3rem 0.5rem;
-        color: oklch(0.9 0.01 265);
-        font-size: 0.72rem;
-        outline: none;
-        transition: border-color 0.15s ease;
-        letter-spacing: 0.04em;
-    }
-
-    .enc-input::placeholder {
-        color: oklch(0.3 0.02 265);
-    }
-
-    .enc-input:focus {
-        border-color: #22d3ee44;
-    }
-
-    .enc-hint {
-        font-size: 0.6rem;
-        color: oklch(0.38 0.02 265);
-        line-height: 1.4;
-    }
-
     /* ── Onboarding ─────────────────────────────── */
 
     .onboard-wrap {
@@ -1335,71 +1332,6 @@
     .onboard-sub strong {
         color: oklch(0.72 0.02 265);
         font-weight: 600;
-    }
-
-    .onboard-select {
-        background: oklch(1 0 0 / 4%);
-        border: 1px solid oklch(1 0 0 / 10%);
-        border-radius: 6px;
-        padding: 0.45rem 0.6rem;
-        color: oklch(0.9 0.01 265);
-        font-size: 0.75rem;
-        outline: none;
-        cursor: pointer;
-        appearance: none;
-    }
-
-    .onboard-select:focus {
-        border-color: oklch(1 0 0 / 20%);
-        box-shadow: 0 0 0 1px oklch(1 0 0 / 10%);
-    }
-
-    .onboard-preview {
-        display: flex;
-        flex-direction: column;
-        gap: 0.4rem;
-        padding: 0.6rem 0;
-    }
-
-    .onboard-preview-label {
-        font-size: 0.65rem;
-        color: oklch(0.4 0.02 265);
-        letter-spacing: 0.05em;
-        margin-bottom: 0.2rem;
-    }
-
-    .onboard-preview-item {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-size: 0.72rem;
-        color: oklch(0.8 0.01 265);
-        padding: 0.3rem 0.5rem;
-        background: oklch(1 0 0 / 3%);
-        border-radius: 4px;
-    }
-
-    .onboard-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        flex-shrink: 0;
-    }
-
-    .onboard-full {
-        color: oklch(0.5 0.02 265);
-        font-size: 0.65rem;
-        flex: 1;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .onboard-comp-count {
-        font-size: 0.6rem;
-        color: oklch(0.4 0.02 265);
-        flex-shrink: 0;
     }
 
     .onboard-btn {
@@ -1460,14 +1392,6 @@
         }
         .overall-pill {
             padding: 0.3rem 0.65rem;
-        }
-        .user-group {
-            padding-left: 0;
-            border-left: none;
-        }
-        .user-email {
-            max-width: 140px;
-            font-size: 0.62rem;
         }
         .main {
             padding: 1.25rem 0.75rem;

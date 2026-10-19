@@ -2,44 +2,63 @@ import { json } from '@sveltejs/kit';
 import {
 	getAllSemesters,
 	createSemester,
+	createSemesterWithCourses,
 	renameSemester,
 	reorderSemesters,
-	deleteSemester
+	deleteSemester,
+	semesterExists
 } from '$lib/server/db';
+import { getCourses } from '$lib/data/courses';
+import * as v from '$lib/server/validation';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async () => {
-	const semesters = getAllSemesters();
-	return json(semesters);
+	return json(getAllSemesters());
 };
 
+/**
+ * POST /api/semesters → { id?, label, branch, semester, seed? }
+ * Creates the semester (active) and, with seed: true, its catalog courses in one transaction.
+ * Responds with { semester, courses }.
+ */
 export const POST: RequestHandler = async ({ request }) => {
-	const { id, label, branch, semester } = await request.json();
-	if (!id || !label || !branch || !semester) {
-		return json({ error: 'Missing fields' }, { status: 400 });
+	const body = await v.readJsonObject(request);
+	if (!body) return v.jsonError(400, 'Invalid request body');
+	const id = body.id ?? crypto.randomUUID();
+	if (!v.isSafeId(id)) return v.jsonError(400, 'Invalid semester id');
+	if (semesterExists(id)) return v.jsonError(409, 'Semester id already exists');
+
+	const label = v.name(body.label);
+	if (!label.ok || typeof body.branch !== 'string' || !body.branch || typeof body.semester !== 'string' || !body.semester) {
+		return v.jsonError(400, 'Missing or invalid label, branch or semester');
 	}
-	const meta = createSemester(id, label, branch, semester);
-	return json(meta);
+
+	if (body.seed === true) {
+		const catalogCourses = getCourses(body.branch, body.semester);
+		if (catalogCourses.length === 0) return v.jsonError(400, 'No catalog courses found for this branch and semester');
+		return json(createSemesterWithCourses(id, label.value as string, body.branch, body.semester, catalogCourses));
+	}
+
+	return json({ semester: createSemester(id, label.value as string, body.branch, body.semester), courses: [] });
 };
 
 export const PATCH: RequestHandler = async ({ request }) => {
-	const { id, label, order } = await request.json();
-	if (Array.isArray(order)) {
-		reorderSemesters(order);
+	const body = await v.readJsonObject(request);
+	if (!body) return v.jsonError(400, 'Invalid request body');
+	if (body.order !== undefined) {
+		if (!Array.isArray(body.order) || !body.order.every(v.isSafeId)) return v.jsonError(400, 'Invalid semester order');
+		reorderSemesters(body.order);
 		return json({ ok: true });
 	}
-	if (!id || !label) {
-		return json({ error: 'Missing fields' }, { status: 400 });
-	}
-	renameSemester(id, label);
+	const label = v.name(body.label);
+	if (!v.isSafeId(body.id) || !label.ok) return v.jsonError(400, 'Missing or invalid id or label');
+	if (!renameSemester(body.id, label.value as string)) return v.jsonError(404, 'Semester not found');
 	return json({ ok: true });
 };
 
 export const DELETE: RequestHandler = async ({ request }) => {
-	const { id } = await request.json();
-	if (!id) {
-		return json({ error: 'Missing id' }, { status: 400 });
-	}
-	deleteSemester(id);
+	const body = await v.readJsonObject(request);
+	if (!body || !v.isSafeId(body.id)) return v.jsonError(400, 'Missing or invalid id');
+	deleteSemester(body.id);
 	return json({ ok: true });
 };

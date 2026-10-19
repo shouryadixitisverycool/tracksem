@@ -13,7 +13,7 @@
 		</div>
 
 		<p class="hint mono">
-			data is stored in `data/tracksem.db` on this machine. no sign-in is required anymore.
+			data is stored in a local SQLite file on the server (`TRACKSEM_DB_PATH`). no sign-in is required.
 		</p>
 
 		<button class="submit mono" type="button" onclick={() => goto('/')}>

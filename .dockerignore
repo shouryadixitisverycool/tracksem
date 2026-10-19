@@ -1,9 +1,13 @@
 .git
+.git/
 node_modules
 .svelte-kit
 .wrangler
 build
 data
+data/
+curriculums/
+presentation-output/
 .env
 .env.*
 supabase

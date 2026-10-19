@@ -1,56 +1,64 @@
 import { json } from '@sveltejs/kit';
-import { addCourseWithDefaults, deleteCourse, getCoursesBySemester, getAllCourses, updateCourseClassSize, updateCourseGradeVisibility } from '$lib/server/db';
+import {
+	addCourseWithDefaults,
+	deleteCourse,
+	getAllCourses,
+	getCoursesBySemester,
+	getEveryCourse,
+	updateCourseField,
+	updateCourseGradeVisibility
+} from '$lib/server/db';
+import * as v from '$lib/server/validation';
 import type { RequestHandler } from './$types';
 
+/** GET /api/courses?semesterId=… | ?all=1 (every semester) | (active semester) */
 export const GET: RequestHandler = async ({ url }) => {
+	if (url.searchParams.get('all') === '1') return json(getEveryCourse());
 	const semesterId = url.searchParams.get('semesterId');
-	const courses = semesterId
-		? await getCoursesBySemester(semesterId)
-		: await getAllCourses();
-	return json(courses);
+	if (semesterId !== null && !v.isSafeId(semesterId)) return v.jsonError(400, 'Invalid semesterId');
+	return json(semesterId ? getCoursesBySemester(semesterId) : getAllCourses());
 };
 
+/** PATCH /api/courses → { id, field, value } (visibility fields also accept { hidden }) */
 export const PATCH: RequestHandler = async ({ request }) => {
-	const { id, field, hidden, value } = await request.json();
-	if (field === 'classSize') {
-		if (typeof id !== 'string' || !id ||
-			(value !== null && !(Number.isInteger(value) && value > 0))) {
-			return json({ error: 'Invalid class size' }, { status: 400 });
-		}
-		if (!updateCourseClassSize(id, value)) {
-			return json({ error: 'Course not found' }, { status: 404 });
-		}
+	const body = await v.readJsonObject(request);
+	if (!body || !v.isSafeId(body.id)) return v.jsonError(400, 'Invalid course id');
+	const { id, field } = body;
+
+	if (field === 'hideAbsoluteGrade' || field === 'hideRelativeGrade') {
+		const hidden = body.hidden ?? body.value;
+		if (typeof hidden !== 'boolean') return v.jsonError(400, 'Invalid grade visibility settings');
+		if (!updateCourseGradeVisibility(id, field, hidden)) return v.jsonError(404, 'Course not found');
 		return json({ ok: true });
 	}
-	if (typeof id !== 'string' || !id ||
-		(field !== 'hideAbsoluteGrade' && field !== 'hideRelativeGrade') ||
-		typeof hidden !== 'boolean') {
-		return json({ error: 'Invalid grade visibility settings' }, { status: 400 });
-	}
-	if (!updateCourseGradeVisibility(id, field, hidden)) {
-		return json({ error: 'Course not found' }, { status: 404 });
-	}
-	return json({ ok: true });
+
+	const result = updateCourseField(id, field as string, body.value);
+	return result.ok ? json({ ok: true }) : v.jsonError(result.status, result.error);
 };
 
-/** POST /api/courses → add a new course with defaults */
+/** POST /api/courses → add a new course with default components */
 export const POST: RequestHandler = async ({ request }) => {
-	const { name, fullName, color, semesterId } = await request.json();
-	if (!name || !fullName || !color) {
-		return json({ error: 'Missing fields' }, { status: 400 });
-	}
+	const body = await v.readJsonObject(request);
+	if (!body) return v.jsonError(400, 'Invalid request body');
+	const name = v.name(body.name);
+	const fullName = v.name(body.fullName ?? body.name);
+	const color = v.color(body.color);
+	if (!name.ok || !fullName.ok || !color.ok) return v.jsonError(400, 'Missing or invalid name, full name or color');
+	if (body.semesterId != null && !v.isSafeId(body.semesterId)) return v.jsonError(400, 'Invalid semesterId');
 
-	const course = await addCourseWithDefaults(name, fullName, color, semesterId ?? undefined);
-	return json(course);
+	const result = addCourseWithDefaults(
+		name.value as string,
+		fullName.value as string,
+		color.value as string,
+		(body.semesterId as string | undefined) ?? undefined
+	);
+	return result.ok ? json(result.value) : v.jsonError(result.status, result.error);
 };
 
 /** DELETE /api/courses → delete a course */
 export const DELETE: RequestHandler = async ({ request }) => {
-	const { id } = await request.json();
-	if (!id) {
-		return json({ error: 'Missing id' }, { status: 400 });
-	}
-
-	await deleteCourse(id);
+	const body = await v.readJsonObject(request);
+	if (!body || !v.isSafeId(body.id)) return v.jsonError(400, 'Missing or invalid id');
+	deleteCourse(body.id);
 	return json({ ok: true });
 };

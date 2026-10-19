@@ -43,6 +43,7 @@ export type Course = {
   officialGrade?: string | null;
   /** Catalog template id the course was seeded from (used by reset) */
   templateId?: string | null;
+  semesterId?: string | null;
   components: Component[];
 };
 

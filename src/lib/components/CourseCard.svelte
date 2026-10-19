@@ -13,8 +13,6 @@
     const gradeColor = $derived(getGradeColor(proj.grade));
     const letter = $derived(getLetterGrade(proj.grade));
     const curved = $derived(grades.curvedGrade(course.id));
-
-
 </script>
 
 <div class="course-card group">
@@ -61,18 +59,22 @@
                 </span>
             </div>
         {/if}
+        {#if curved && !course.hideRelativeGrade && curved.coverage < 1}
+            <div class="coverage-note mono">relative grade based on {Math.round(curved.coverage * 100)}% of course</div>
+        {/if}
 
         <!-- Component bars -->
         <div class="bars">
             {#each course.components as comp}
                 {@const pct = computeEffectiveCompPct(course, comp)}
+                {@const width = Math.min(Math.max(pct ?? 0, 0), 100)}
                 {@const barColor = getGradeColor(pct)}
                 <div class="bar-row">
                     <div class="bar-label mono">{comp.name}</div>
                     <div class="bar-track">
                         <div
                             class="bar-fill"
-                            style="width: {pct ?? 0}%; background: {pct !== null
+                            style="width: {width}%; background: {pct !== null
                                 ? barColor
                                 : 'transparent'}; border: 1px solid {pct !==
                             null
@@ -237,6 +239,12 @@
     .grade-empty {
         font-size: 0.75rem;
         color: oklch(0.45 0.02 265);
+    }
+
+    .coverage-note {
+        font-size: 0.6rem;
+        color: oklch(0.45 0.02 265);
+        margin-top: -0.4rem;
     }
 
     .bars {

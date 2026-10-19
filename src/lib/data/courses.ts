@@ -18,7 +18,7 @@ export const DEFAULT_COURSES: Course[] = [
   {
     id: "cs6201",
     name: "ISS",
-    fullName: "Information Security & Systems",
+    fullName: "Introduction to Software Systems",
     color: "#22d3ee",
     components: [
       {
@@ -137,7 +137,7 @@ export const DEFAULT_COURSES: Course[] = [
   {
     id: "cs3303",
     name: "IoT",
-    fullName: "Internet of Things",
+    fullName: "Introduction to IoT",
     color: "#34d399",
     components: [
       {
@@ -283,9 +283,34 @@ const PALETTE = [
   "#f472b6", "#60a5fa", "#f97316", "#10b981",
 ] as const;
 
+/** Credits from the IIIT-H curriculum PDFs (curriculums/), keyed by catalog id. */
+export const COURSE_CREDITS: Record<string, number> = {
+  // Semester 1
+  ma5101: 4, ma1101: 4, ma4101: 4, cs0101: 5, ec2101: 5, hs8101: 4, hs4102: 4,
+  hs7101: 2, gs0101: 4, cl1101: 4, sc4101: 2, ec5101: 4, ec2102: 2,
+  // Semester 2
+  ma2101: 4, cs3303: 3, cs1201: 5, cs6201: 2, cs2201: 4, gs0301: 2, hs0201: 4,
+  cl1102: 4, cl3101: 4, sc1102: 2, sc1101: 2, sc2101: 4, sc4102: 2, ec2103: 5, ec5102: 4,
+  // Semester 3
+  ma6101: 4, ma6102: 4, cs4301: 2, cs1302: 2, cs1301: 4, cs3301: 4, ec3202: 3,
+  sc1110: 4, hs0202: 4, cs2203: 4, cl3202: 4, sc1203: 4, sc3101: 4, sc4110: 2,
+  ec5201: 5, ec5202: 4, ec6201: 4,
+  // Semester 4
+  cs6301: 4, cs7301: 4, sc1111: 4, hs8102: 4, hs0302: 4, hs7301: 4, cs7303: 2,
+  csl1204: 4, cs7401: 4, sc1204: 2, sc1205: 2, sc2203: 2, sc2202: 2, sc4111: 2,
+  ec5203: 4, ec2202: 4, ec6202: 2,
+};
+
 /** Build a Course with empty components (seeded via addCourseWithDefaults). */
 function cr(id: string, name: string, fullName: string, ci: number): Course {
-  return { id, name, fullName, color: PALETTE[ci % PALETTE.length], components: [] };
+  return {
+    id,
+    name,
+    fullName,
+    color: PALETTE[ci % PALETTE.length],
+    credits: COURSE_CREDITS[id] ?? null,
+    components: [],
+  };
 }
 
 export const SEM_DATA: Record<string, Record<string, Course[]>> = {
@@ -298,7 +323,8 @@ export const SEM_DATA: Record<string, Record<string, Course[]>> = {
       cr("gs0101", "GS0.101", "Spatial Thinking and Practice", 3),
     ],
     "Semester 2": [
-      cr("ma3101", "MA3.101", "Linear Algebra", 0),
+      // CGD's curriculum codes Linear Algebra as MA3.101; it is the same course as the ma2101 template.
+      cr("ma2101", "MA3.101", "Linear Algebra", 0),
       cr("cs3303", "CS3.303", "Introduction to IoT", 1),
       cr("cs1201", "CS1.201", "Data Structures and Algorithms", 2),
       cr("cs6201", "CS6.201", "Introduction to Software Systems", 3),
@@ -561,4 +587,23 @@ export function getSemesters(branch: string): string[] {
 }
 export function getCourses(branch: string, sem: string): Course[] {
   return SEM_DATA[branch]?.[sem] ?? [];
+}
+
+function allCatalogCourses(): Course[] {
+  return Object.values(SEM_DATA).flatMap((branch) => Object.values(branch).flat());
+}
+
+/** First catalog entry with this id (any branch / semester) */
+export function findCatalogCourse(id: string): Course | undefined {
+  return allCatalogCourses().find((course) => course.id === id);
+}
+
+/** Catalog id for a seeded course name such as "CS6.201" */
+export function catalogIdForName(name: string): string | undefined {
+  return allCatalogCourses().find((course) => course.name === name)?.id;
+}
+
+/** Component template for a catalog id; DEFAULT_COURSES first, then SEM_DATA */
+export function findTemplate(templateId: string): Course | undefined {
+  return DEFAULT_COURSES.find((course) => course.id === templateId) ?? findCatalogCourse(templateId);
 }

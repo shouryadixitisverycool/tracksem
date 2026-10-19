@@ -28,24 +28,21 @@
         }
     });
 
-    function generateKey(): string {
-        const bytes = new Uint8Array(16);
-        crypto.getRandomValues(bytes);
-        return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    }
-
-    let useCustomKey = $state(false);
-    let defaultKey = $state(generateKey());
-    let customKey = $state("");
+    let startError = $state<string | null>(null);
 
     async function handleStart() {
         if (!selectedBranch || !selectedSemester || seeding) return;
         seeding = true;
-        const label = semesterLabel.trim() || `${selectedBranch} · ${selectedSemester}`;
-        await grades.createSemester(label, selectedBranch, selectedSemester);
-        await grades.seedFromCatalog(selectedBranch, selectedSemester);
-        seeding = false;
-        goto("/");
+        startError = null;
+        const label = (semesterLabel.trim() || `${selectedBranch} · ${selectedSemester}`).slice(0, 100);
+        try {
+            await grades.createSemester(label, selectedBranch, selectedSemester);
+            goto("/");
+        } catch (error) {
+            startError = error instanceof Error ? error.message : "could not create the semester";
+        } finally {
+            seeding = false;
+        }
     }
 </script>
 
@@ -77,53 +74,9 @@
                     {/if}
                 </div>
 
-                <!-- Encryption key (cosmetic) -->
-                <div class="enc-block">
-                    <div class="enc-label-row">
-                        <span class="enc-label mono">// encryption key</span>
-                        <div class="enc-toggle">
-                            <button
-                                class="enc-tab mono"
-                                class:active={!useCustomKey}
-                                onclick={() => { useCustomKey = false; }}
-                            >default</button>
-                            <button
-                                class="enc-tab mono"
-                                class:active={useCustomKey}
-                                onclick={() => { useCustomKey = true; }}
-                            >custom</button>
-                        </div>
-                    </div>
-
-                    {#if !useCustomKey}
-                        <div class="enc-key-row">
-                            <span class="enc-key mono">{defaultKey}</span>
-                            <button
-                                class="enc-regen mono"
-                                title="regenerate"
-                                onclick={() => { defaultKey = generateKey(); }}
-                            >↺</button>
-                        </div>
-                        <div class="enc-hint mono">
-                            a random key has been generated for you — your data is encrypted before leaving your device
-                        </div>
-                    {:else}
-                        <input
-                            class="enc-input mono"
-                            type="text"
-                            placeholder="enter your own key (min 8 chars)"
-                            bind:value={customKey}
-                            spellcheck="false"
-                            autocomplete="off"
-                        />
-                        <div class="enc-hint mono">
-                            use your own passphrase — only you can decrypt your data
-                        </div>
-                    {/if}
-                </div>
-
                 <select
                     class="onboard-select mono"
+                    aria-label="Branch"
                     bind:value={selectedBranch}
                     onchange={() => { selectedSemester = ""; }}
                 >
@@ -136,6 +89,7 @@
                 {#if selectedBranch}
                     <select
                         class="onboard-select mono"
+                        aria-label="Semester"
                         bind:value={selectedSemester}
                     >
                         <option value="">select semester</option>
@@ -184,6 +138,9 @@
                     >
                         {seeding ? "setting up..." : "start semester"}
                     </button>
+                    {#if startError}
+                        <div class="start-error mono" role="alert">{startError}</div>
+                    {/if}
                 {/if}
             </div>
         </div>
@@ -412,126 +369,15 @@
         cursor: not-allowed;
     }
 
-    /* ── Encryption key field ────────────────────── */
-
-    .enc-block {
-        background: oklch(1 0 0 / 3%);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 8px;
-        padding: 0.65rem 0.75rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-
-    .enc-label-row {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-    }
-
-    .enc-label {
-        font-size: 0.62rem;
-        color: oklch(0.4 0.02 265);
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-    }
-
-    .enc-toggle {
-        display: flex;
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 2px;
-        gap: 2px;
-    }
-
-    .enc-tab {
-        font-size: 0.6rem;
-        padding: 0.15rem 0.5rem;
-        background: transparent;
-        border: none;
-        border-radius: 3px;
-        color: oklch(0.42 0.02 265);
-        cursor: pointer;
-        transition: all 0.15s ease;
-        letter-spacing: 0.03em;
-    }
-
-    .enc-tab:hover {
-        color: oklch(0.7 0.02 265);
-    }
-
-    .enc-tab.active {
-        background: oklch(0.16 0.02 265);
-        color: #22d3ee;
-        border: 1px solid oklch(1 0 0 / 8%);
-    }
-
-    .enc-key-row {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 0.3rem 0.5rem;
-    }
-
-    .enc-key {
-        flex: 1;
-        font-size: 0.68rem;
-        color: #22d3ee;
-        letter-spacing: 0.06em;
-        word-break: break-all;
-        user-select: all;
-    }
-
-    .enc-regen {
-        background: none;
-        border: none;
-        color: oklch(0.45 0.02 265);
-        font-size: 0.85rem;
-        cursor: pointer;
-        padding: 0.1rem 0.2rem;
-        border-radius: 3px;
-        line-height: 1;
-        flex-shrink: 0;
-        transition: color 0.15s ease;
-    }
-
-    .enc-regen:hover {
-        color: oklch(0.8 0.02 265);
-    }
-
-    .enc-input {
-        background: oklch(0.08 0.02 265);
-        border: 1px solid oklch(1 0 0 / 8%);
-        border-radius: 5px;
-        padding: 0.3rem 0.5rem;
-        color: oklch(0.9 0.01 265);
-        font-size: 0.72rem;
-        outline: none;
-        transition: border-color 0.15s ease;
-        letter-spacing: 0.04em;
-    }
-
-    .enc-input::placeholder {
-        color: oklch(0.3 0.02 265);
-    }
-
-    .enc-input:focus {
-        border-color: #22d3ee44;
-    }
-
-    .enc-hint {
-        font-size: 0.6rem;
-        color: oklch(0.38 0.02 265);
-        line-height: 1.4;
+    .start-error {
+        font-size: 0.65rem;
+        color: #f87171;
     }
 
     @media (max-width: 768px) {
+        .onboard-select,
+        .label-input { font-size: 16px; }
+
         .header { padding: 0.875rem 1rem; }
         .main { padding: 1.25rem 0.75rem; }
     }

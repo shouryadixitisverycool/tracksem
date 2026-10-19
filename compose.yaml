@@ -8,5 +8,13 @@ services:
       - "${TRACKSEM_BIND_IP:-127.0.0.1}:${TRACKSEM_PORT:-3173}:3000"
     environment:
       ORIGIN: "${TRACKSEM_ORIGIN:-http://localhost:3173}"
+      TRACKSEM_DB_PATH: /app/data/tracksem.db
+      # Hosts accepted besides ORIGIN's hostname and localhost (DNS-rebinding guard)
+      TRACKSEM_ALLOWED_HOSTS: "${TRACKSEM_BIND_IP:-127.0.0.1}"
     volumes:
       - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
