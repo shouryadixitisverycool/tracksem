@@ -152,6 +152,29 @@ export function scoreToPercentile(score: number, dist: ScoreDistribution): numbe
     return distributionCdf(score, dist) * 100;
 }
 
+// ── Input validation ─────────────────────────────────────────────────────────
+
+export interface StatsInput {
+    maxScore: number;
+    score?: number | null;
+    classAvg?: number | null;
+    classMedian?: number | null;
+    classMax?: number | null;
+    classStdDev?: number | null;
+    classFullPct?: number | null;
+}
+
+export interface StatsIssue {
+    field: 'score' | 'classAvg' | 'classMedian' | 'classMax' | 'classStdDev' | 'classFullPct';
+    level: 'error' | 'warning';
+    message: string;
+}
+
+// TODO(model agent): stub
+export function validateStats(_item: StatsInput): StatsIssue[] {
+    return [];
+}
+
 // ── Percentile → Letter grade ────────────────────────────────────────────────
 
 export type CurvedLetter = 'A' | 'A-' | 'B' | 'B-' | 'C' | 'C-' | 'D' | 'F';

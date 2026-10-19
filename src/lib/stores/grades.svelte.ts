@@ -6,6 +6,7 @@ import {
     type PredictedGrade,
     type Standing,
 } from '$lib/curveGrading';
+import type { CourseCurvedGrade } from '$lib/gradeMath';
 
 function generateId(): string {
     if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -520,7 +521,7 @@ class GradesStore {
     }
 
     /** Overall curved grade: standing on the weighted total of components that have a score AND class stats */
-    curvedGrade(courseId: string): PredictedGrade | null {
+    curvedGrade(courseId: string): CourseCurvedGrade | null {
         const course = this.courses.find((c) => c.id === courseId);
         if (!course) return null;
 
@@ -529,7 +530,14 @@ class GradesStore {
             .filter((item): item is { weight: number; standing: Standing } => item.standing !== null);
 
         const combined = combineStandings(items);
-        return combined ? standingToPrediction(combined) : null;
+        if (!combined) return null;
+        const totalWeight = course.components.reduce((sum, comp) => sum + comp.weight, 0);
+        const usedWeight = items.reduce((sum, item) => sum + item.weight, 0);
+        return {
+            ...standingToPrediction(combined),
+            coverage: totalWeight > 0 ? usedWeight / totalWeight : 0,
+            projected: null,
+        };
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────────
