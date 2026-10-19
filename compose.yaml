@@ -1,0 +1,12 @@
+services:
+  tracksem:
+    build: .
+    image: tracksem:local
+    container_name: tracksem
+    restart: unless-stopped
+    ports:
+      - "${TRACKSEM_BIND_IP:-127.0.0.1}:${TRACKSEM_PORT:-3173}:3000"
+    environment:
+      ORIGIN: "${TRACKSEM_ORIGIN:-http://localhost:3173}"
+    volumes:
+      - ./data:/app/data

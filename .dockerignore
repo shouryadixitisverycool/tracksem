@@ -1,0 +1,10 @@
+.git
+node_modules
+.svelte-kit
+.wrangler
+build
+data
+.env
+.env.*
+supabase
+*.log
