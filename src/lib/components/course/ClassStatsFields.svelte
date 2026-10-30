@@ -6,6 +6,8 @@
     interface Props {
         /** Unique prefix for input ids */
         idPrefix: string;
+        /** Item name, for input labels */
+        label: string;
         maxScore: number;
         /** Student's marks on this item (same scale as maxScore), used to sanity-check the stats */
         score: number | null;
@@ -14,11 +16,27 @@
         classMax?: number | null;
         classStdDev?: number | null;
         classFullPct?: number | null;
+        /** σ the curve uses when none is entered; shown as the placeholder */
+        estimatedSd?: number | null;
+        /** One inline row with short labels, for per-part stats */
+        compact?: boolean;
         onCommit: (field: StatField, value: number | null) => void;
     }
 
-    let { idPrefix, maxScore, score, classAvg, classMedian, classMax, classStdDev, classFullPct, onCommit }: Props =
-        $props();
+    let {
+        idPrefix,
+        label,
+        maxScore,
+        score,
+        classAvg,
+        classMedian,
+        classMax,
+        classStdDev,
+        classFullPct,
+        estimatedSd = null,
+        compact = false,
+        onCommit,
+    }: Props = $props();
 
     const issues = $derived(
         validateStats({ maxScore, score, classAvg, classMedian, classMax, classStdDev, classFullPct }) ?? []
@@ -29,77 +47,56 @@
         if (fieldIssues.some((issue) => issue.level === "error")) return "error";
         return fieldIssues.length > 0 ? "warning" : null;
     }
+
+    const fields = $derived([
+        { key: "classAvg", long: "average", short: "avg", value: classAvg, max: maxScore, placeholder: "—", title: "Class average" },
+        { key: "classMedian", long: "median", short: "median", value: classMedian, max: maxScore, placeholder: "—", title: "Class median" },
+        {
+            key: "classMax",
+            long: "highest",
+            short: "max",
+            value: classMax,
+            max: maxScore,
+            placeholder: String(maxScore),
+            title: "Highest score in the class. Left blank, the paper max is assumed.",
+        },
+        {
+            key: "classStdDev",
+            long: "std dev",
+            short: "σ",
+            value: classStdDev,
+            max: null,
+            placeholder: estimatedSd != null ? `≈${Math.round(estimatedSd * 10) / 10}` : "auto",
+            title: "Standard deviation. Left blank, it is estimated from the highest mark.",
+        },
+        {
+            key: "classFullPct",
+            long: "% full marks",
+            short: "full %",
+            value: classFullPct,
+            max: 100,
+            placeholder: "—",
+            title: "Percentage of the class that scored full marks",
+        },
+    ] as const);
 </script>
 
-<div class="stats-inputs">
-    <div class="stats-field">
-        <label class="stats-label mono" for="{idPrefix}-avg">avg</label>
-        <NumberField
-            id="{idPrefix}-avg"
-            class="num-input mono stats-input"
-            value={classAvg}
-            max={maxScore}
-            placeholder="class avg"
-            tone={toneFor("classAvg")}
-            onCommit={(v) => onCommit("classAvg", v)}
-        />
-    </div>
-    <div class="stats-field">
-        <label class="stats-label mono" for="{idPrefix}-median">median</label>
-        <NumberField
-            id="{idPrefix}-median"
-            class="num-input mono stats-input"
-            value={classMedian}
-            max={maxScore}
-            placeholder="optional"
-            tone={toneFor("classMedian")}
-            onCommit={(v) => onCommit("classMedian", v)}
-        />
-    </div>
-    <div class="stats-field">
-        <label class="stats-label mono" for="{idPrefix}-max">max</label>
-        <NumberField
-            id="{idPrefix}-max"
-            class="num-input mono stats-input"
-            value={classMax}
-            max={maxScore}
-            placeholder={String(maxScore)}
-            title="Highest score in the class. Defaults to the paper max (assumes someone got full marks)."
-            tone={toneFor("classMax")}
-            onCommit={(v) => onCommit("classMax", v)}
-        />
-        {#if classMax == null}
-            <span class="assumed-badge mono" title="No class max entered, so the paper max is assumed">
-                assumed {maxScore}
-            </span>
-        {/if}
-    </div>
-    <div class="stats-field">
-        <label class="stats-label mono" for="{idPrefix}-sd">σ</label>
-        <NumberField
-            id="{idPrefix}-sd"
-            class="num-input mono stats-input"
-            value={classStdDev}
-            placeholder="auto"
-            tone={toneFor("classStdDev")}
-            onCommit={(v) => onCommit("classStdDev", v)}
-        />
-    </div>
-    <div class="stats-field">
-        <label class="stats-label mono" for="{idPrefix}-full" title="Percentage of the class that scored full marks">
-            full %
+<div class="stat-fields mono" class:compact>
+    {#each fields as field (field.key)}
+        <label class="stat-field" for="{idPrefix}-{field.key}" title={field.title}>
+            <span>{compact ? field.short : field.long}</span>
+            <NumberField
+                id="{idPrefix}-{field.key}"
+                class="num-input mono"
+                ariaLabel="{label} class {field.long}"
+                value={field.value}
+                max={field.max}
+                placeholder={field.placeholder}
+                tone={toneFor(field.key)}
+                onCommit={(v) => onCommit(field.key, v)}
+            />
         </label>
-        <NumberField
-            id="{idPrefix}-full"
-            class="num-input mono stats-input"
-            value={classFullPct}
-            max={100}
-            placeholder="optional"
-            title="Percentage of the class that scored full marks"
-            tone={toneFor("classFullPct")}
-            onCommit={(v) => onCommit("classFullPct", v)}
-        />
-    </div>
+    {/each}
 </div>
 {#if issues.length > 0}
     <ul class="stats-issues mono">

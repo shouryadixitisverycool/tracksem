@@ -1,6 +1,9 @@
 services:
   tracksem:
-    build: .
+    build:
+      context: .
+      args:
+        TRACKSEM_BASE_PATH: "${TRACKSEM_BASE_PATH:-}"
     image: tracksem:local
     container_name: tracksem
     restart: unless-stopped
@@ -9,8 +12,12 @@ services:
     environment:
       ORIGIN: "${TRACKSEM_ORIGIN:-http://localhost:3173}"
       TRACKSEM_DB_PATH: /app/data/tracksem.db
-      # Hosts accepted besides ORIGIN's hostname and localhost (DNS-rebinding guard)
-      TRACKSEM_ALLOWED_HOSTS: "${TRACKSEM_BIND_IP:-127.0.0.1}"
+      # Hosts accepted besides ORIGIN's hostname and localhost (DNS-rebinding guard);
+      # "tracksem" lets containers on tracksem_default (Glance's health check) reach it
+      TRACKSEM_ALLOWED_HOSTS: "${TRACKSEM_BIND_IP:-127.0.0.1},tracksem"
+      # Client IP for rate limits, when a proxy sets it (empty = use the socket address)
+      ADDRESS_HEADER: "${TRACKSEM_ADDRESS_HEADER:-}"
+      XFF_DEPTH: "${TRACKSEM_XFF_DEPTH:-1}"
     volumes:
       - ./data:/app/data
     logging:

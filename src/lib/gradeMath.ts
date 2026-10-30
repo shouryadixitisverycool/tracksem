@@ -8,6 +8,7 @@ import {
     distributionMoments,
     gradeFromPercentile,
     inverseNormalCdf,
+    percentileToScore,
     predictGrade,
     type CombineItem,
     type PredictedGrade,
@@ -35,7 +36,7 @@ const DEFAULT_ASSUMED_SPREAD = 0.15;
 /** Class average assumed for a component without stats when nothing has been observed, as a fraction of full marks */
 const DEFAULT_ASSUMED_MEAN = 0.6;
 
-type StatsSource = Pick<SubItem, 'maxScore' | 'classAvg' | 'classMedian' | 'classMax' | 'classStdDev' | 'classFullPct'>;
+export type StatsSource = Pick<SubItem, 'maxScore' | 'classAvg' | 'classMedian' | 'classMax' | 'classStdDev' | 'classFullPct'>;
 
 // ── Lookup & scale resolution ────────────────────────────────────────────────
 
@@ -52,10 +53,64 @@ function findItem(course: Course, id: string): FoundItem | null {
     return null;
 }
 
-/** Ids whose percentage `id` reads (its scale target, or its sub-items) */
+const itemOf = (item: FoundItem): Component | SubItem => (item.kind === 'component' ? item.comp : item.sub);
+
+/** Id of the component an item belongs to (the item itself for components) */
+const ownerOf = (item: FoundItem): string => (item.kind === 'component' ? item.comp.id : item.parent.id);
+
+/** Course weight an item carries on its own: a part gets an even share of its component */
+function itemCourseWeight(item: FoundItem): number {
+    if (item.kind === 'component') return Math.max(item.comp.weight, 0);
+    return Math.max(item.parent.weight, 0) / (item.parent.subItems?.length || 1);
+}
+
+/** "Midsem", or "Quizzes / Quiz 1" for a part */
+export function itemLabel(course: Course, id: string): string | null {
+    const item = findItem(course, id);
+    if (!item) return null;
+    return item.kind === 'component' ? item.comp.name : `${item.parent.name} / ${item.sub.name}`;
+}
+
+export interface ScaleSource {
+    id: string;
+    /** Relative weight when several sources are averaged */
+    weight: number;
+}
+
+/**
+ * What an item is scaled from, with the weight each source gets. "Whole course" means every other
+ * weighted component except ones that are themselves scaled from the whole course. Empty when the
+ * item isn't scaled.
+ */
+export function scaleSources(course: Course, id: string): ScaleSource[] {
+    const item = findItem(course, id);
+    const rule = item ? itemOf(item).scale : null;
+    if (!item || !rule) return [];
+
+    const own = ownerOf(item);
+    const found: FoundItem[] =
+        rule.from === 'course'
+            ? course.components
+                  .filter((comp) => comp.id !== own && comp.weight > 0 && comp.scale?.from !== 'course')
+                  .map((comp) => ({ kind: 'component' as const, comp }))
+            : rule.from
+                  .map((sourceId) => findItem(course, sourceId))
+                  .filter((source): source is FoundItem => source !== null && itemOf(source).id !== id);
+
+    return found.map((source) => ({
+        id: itemOf(source).id,
+        weight: rule.combine === 'equal' ? 1 : itemCourseWeight(source),
+    }));
+}
+
+/**
+ * Ids whose percentage `id` reads (its scale sources, or its sub-items). Whole-course items list
+ * none: they skip any component that leads back to them, so they can't close a cycle.
+ */
 function scaleDependencies(item: FoundItem): string[] {
-    if (item.kind === 'sub') return item.sub.scaleTargetId ? [item.sub.scaleTargetId] : [];
-    if (item.comp.scaleTargetId) return [item.comp.scaleTargetId];
+    const rule = itemOf(item).scale;
+    if (rule) return rule.from === 'course' ? [] : rule.from;
+    if (item.kind === 'sub') return [];
     return item.comp.subItems?.map((sub) => sub.id) ?? [];
 }
 
@@ -99,6 +154,13 @@ function bestOfAverage(pcts: number[], bestOf: number | undefined): number {
     return average(pcts);
 }
 
+/** Weighted mean; equal weights when every weight is zero */
+function weightedMean(entries: { weight: number; value: number }[]): number {
+    const total = entries.reduce((sum, entry) => sum + entry.weight, 0);
+    if (!(total > 0)) return average(entries.map((entry) => entry.value));
+    return entries.reduce((sum, entry) => sum + entry.weight * entry.value, 0) / total;
+}
+
 /**
  * Compute the effective percentage (0–100) for a component.
  * - If subItems exist: average of filled scores (best-of if bestOf set)
@@ -124,14 +186,15 @@ export function computeSubPct(sub: SubItem): number | null {
 /** `visited` holds the ids already on the scale chain; revisiting one is a cycle and yields null */
 export function computeEffectiveSubPct(course: Course, sub: SubItem, visited: ReadonlySet<string> = new Set()): number | null {
     if (visited.has(sub.id)) return null;
-    if (!sub.scaleTargetId) return computeSubPct(sub);
-    return getScaleTargetPct(course, sub.scaleTargetId, new Set(visited).add(sub.id));
+    if (!sub.scale) return computeSubPct(sub);
+    const item = findItem(course, sub.id);
+    return item ? scaleResult(course, item, new Set(visited).add(sub.id)).pct : null;
 }
 
 export function computeEffectiveCompPct(course: Course, comp: Component, visited: ReadonlySet<string> = new Set()): number | null {
     if (visited.has(comp.id)) return null;
     const seen = new Set(visited).add(comp.id);
-    if (comp.scaleTargetId) return getScaleTargetPct(course, comp.scaleTargetId, seen);
+    if (comp.scale) return scaleResult(course, { kind: 'component', comp }, seen).pct;
 
     if (comp.subItems && comp.subItems.length > 0) {
         const filled = comp.subItems
@@ -156,12 +219,76 @@ export function getScaleTargetPct(
         : computeEffectiveSubPct(course, target.sub, visited);
 }
 
+export interface ScaleResult {
+    /** The item's resulting %, null until a source has marks */
+    pct: number | null;
+    /** Method actually used; relative falls back to absolute when stats are missing */
+    mode: 'absolute' | 'relative';
+    /** Why relative fell back: this item has no class stats, or no graded source does */
+    fallback: 'no-own-stats' | 'no-source-stats' | null;
+    /** Combined curve standing of the graded sources (relative mode only) */
+    standing: PredictedGrade | null;
+    sources: (ScaleSource & { pct: number | null })[];
+}
+
+/** `visited` must already contain the item's own id */
+function scaleResult(course: Course, item: FoundItem, visited: ReadonlySet<string>): ScaleResult {
+    const own = itemOf(item);
+    const rule = own.scale!;
+    const sources = scaleSources(course, own.id).map((source) => ({
+        ...source,
+        pct: getScaleTargetPct(course, source.id, visited),
+    }));
+    const graded = sources.filter((source): source is ScaleSource & { pct: number } => source.pct !== null);
+    const result: ScaleResult = { pct: null, mode: 'absolute', fallback: null, standing: null, sources };
+    if (graded.length === 0) return { ...result, mode: rule.mode };
+
+    result.pct = weightedMean(graded.map((source) => ({ weight: source.weight, value: source.pct })));
+    if (rule.mode === 'absolute') return result;
+
+    const standing = sourceStanding(course, graded, visited);
+    if (!standing) return { ...result, fallback: 'no-source-stats' };
+    const dist = itemDistribution(course, own);
+    if (!dist || !(own.maxScore > 0)) return { ...result, standing, fallback: 'no-own-stats' };
+    const score = percentileToScore(standing.percentile, dist);
+    return { ...result, standing, mode: 'relative', pct: Math.min(Math.max((score / own.maxScore) * 100, 0), 100) };
+}
+
+/** How a scaled item gets its marks, for display; null when the item isn't scaled */
+export function explainScale(course: Course, id: string): ScaleResult | null {
+    const item = findItem(course, id);
+    if (!item || !itemOf(item).scale) return null;
+    return scaleResult(course, item, new Set([id]));
+}
+
+/**
+ * Fraction of a scaled item that rides on each source: the graded sources (plus `assumeGraded`),
+ * or all of them while none has marks.
+ */
+function sourceShares(
+    course: Course,
+    id: string,
+    visited: ReadonlySet<string>,
+    isGraded: (sourceId: string) => boolean = () => false,
+): Map<string, number> {
+    const sources = scaleSources(course, id);
+    const graded = sources.filter((source) => isGraded(source.id) || getScaleTargetPct(course, source.id, visited) !== null);
+    const pool = graded.length > 0 ? graded : sources;
+    const total = pool.reduce((sum, source) => sum + source.weight, 0);
+    return new Map(pool.map((source) => [source.id, total > 0 ? source.weight / total : 1 / pool.length]));
+}
+
+/** Share of scaled item `id` that moves with each source, treating `assumeGraded` as if it had marks */
+export function scaleShares(course: Course, id: string, assumeGraded?: string): Map<string, number> {
+    return sourceShares(course, id, new Set([id]), (sourceId) => sourceId === assumeGraded);
+}
+
 export function effectiveComponentWeight(course: Course, componentId: string): number {
     const comp = course.components.find((item) => item.id === componentId);
-    if (!comp || comp.scaleTargetId) return 0;
+    if (!comp || comp.scale) return 0;
 
     return course.components.reduce(
-        (sum, item) => sum + (item.scaleTargetId === componentId ? item.weight : 0),
+        (sum, item) => sum + (item.scale ? item.weight * (scaleShares(course, item.id).get(componentId) ?? 0) : 0),
         comp.weight
     );
 }
@@ -173,7 +300,8 @@ function hasStats(item: StatsSource): boolean {
     return item.classAvg != null && item.maxScore > 0 && item.classAvg >= 0 && item.classAvg <= item.maxScore;
 }
 
-function itemDistribution(course: Course, item: StatsSource): ScoreDistribution | null {
+/** Fitted score distribution for an item with class stats; null without an average */
+export function itemDistribution(course: Course, item: StatsSource): ScoreDistribution | null {
     if (!hasStats(item)) return null;
     return buildDistribution(item.maxScore, {
         avg: item.classAvg!,
@@ -281,6 +409,23 @@ function expandTarget(
     return true;
 }
 
+/** Spread a scaled item's weight over its sources; false when none of them can be expanded */
+function expandScaled(
+    course: Course,
+    id: string,
+    weight: number,
+    visited: ReadonlySet<string>,
+    out: LeafSet,
+    overrides?: ReadonlyMap<string, Override>,
+): boolean {
+    let expanded = false;
+    const shares = sourceShares(course, id, visited, (sourceId) => overrides?.has(sourceId) ?? false);
+    for (const [sourceId, share] of shares) {
+        if (expandTarget(course, sourceId, weight * share, visited, out, overrides)) expanded = true;
+    }
+    return expanded;
+}
+
 function expandComponent(
     course: Course,
     comp: Component,
@@ -292,8 +437,8 @@ function expandComponent(
     const seen = new Set(visited).add(comp.id);
     const ungraded: Leaf = { id: comp.id, componentId: comp.id, weight, maxScore: comp.maxScore, dist: null, score: null };
 
-    if (comp.scaleTargetId) {
-        if (!expandTarget(course, comp.scaleTargetId, weight, seen, out, overrides)) out.add(ungraded);
+    if (comp.scale) {
+        if (!expandScaled(course, comp.id, weight, seen, out, overrides)) out.add(ungraded);
         return;
     }
 
@@ -336,8 +481,8 @@ function expandSub(
     overrides?: ReadonlyMap<string, Override>,
 ): void {
     const leaf: Leaf = { id: sub.id, componentId: parent.id, weight, maxScore: sub.maxScore, dist: null, score: null };
-    if (sub.scaleTargetId) {
-        if (!expandTarget(course, sub.scaleTargetId, weight, new Set(visited).add(sub.id), out, overrides)) out.add(leaf);
+    if (sub.scale) {
+        if (!expandScaled(course, sub.id, weight, new Set(visited).add(sub.id), out, overrides)) out.add(leaf);
         return;
     }
     out.add({ ...leaf, dist: itemDistribution(course, sub), score: sub.score });
@@ -422,7 +567,7 @@ export function courseCurvedGrade(course: Course): CourseCurvedGrade | null {
     };
 }
 
-/** A component's own curved standing (scaled components take their target's) */
+/** A component's own curved standing (scaled components take their sources') */
 export function componentPrediction(course: Course, comp: Component): PredictedGrade | null {
     return itemPrediction(course, comp.id, new Set());
 }
@@ -431,18 +576,29 @@ function itemPrediction(course: Course, id: string, visited: ReadonlySet<string>
     if (visited.has(id)) return null;
     const item = findItem(course, id);
     if (!item) return null;
-    const seen = new Set(visited).add(id);
 
-    if (item.kind === 'sub') {
-        if (item.sub.scaleTargetId) return itemPrediction(course, item.sub.scaleTargetId, seen);
-        return predictItem(course, item.sub, computeSubPct(item.sub));
-    }
-
-    if (item.comp.scaleTargetId) return itemPrediction(course, item.comp.scaleTargetId, seen);
     const out = new LeafSet();
-    expandComponent(course, item.comp, 1, visited, out);
+    if (item.kind === 'sub') {
+        if (!item.sub.scale) return predictItem(course, item.sub, computeSubPct(item.sub));
+        expandSub(course, item.sub, item.parent, 1, visited, out);
+    } else {
+        expandComponent(course, item.comp, 1, visited, out);
+    }
     const observed = out.list().filter(isObserved);
     return combineItems(observed.map(toCombineItem), { classSize: course.classSize });
+}
+
+/** Combined curve standing of a set of weighted items */
+function sourceStanding(course: Course, sources: ScaleSource[], visited: ReadonlySet<string>): PredictedGrade | null {
+    const out = new LeafSet();
+    for (const source of sources) expandTarget(course, source.id, source.weight > 0 ? source.weight : 1, visited, out);
+    const observed = out.list().filter(isObserved);
+    return combineItems(observed.map(toCombineItem), { classSize: course.classSize });
+}
+
+/** Curved standing of any item (component or part) on its own, for display */
+export function standingOf(course: Course, id: string): PredictedGrade | null {
+    return itemPrediction(course, id, new Set());
 }
 
 /** Distribution assumed for a component without its own stats: the typical shape of what's been graded */
@@ -456,17 +612,22 @@ function assumedDistribution(course: Course, comp: Component, leaves: Leaf[]): S
     }, course.classSize);
 }
 
+/** Projected final percentile of the course as a function of the raw score on one component */
+export interface PercentileSolver {
+    maxScore: number;
+    /** True when the component's class stats were assumed rather than entered */
+    assumedStats: boolean;
+    /** Projected final percentile if the component scores `score` raw marks; NaN when it can't be projected */
+    percentileAt(score: number): number;
+}
+
 /**
- * Raw score needed on a component for the course's projected final percentile to reach
- * `targetPercentile`. Other unobserved components are projected from the resulting standing.
+ * Builds a solver for "what if I score X on this component". Other unobserved components are
+ * projected from the resulting standing. Null for scaled or weightless components.
  */
-export function requiredScoreForPercentile(
-    course: Course,
-    componentId: string,
-    targetPercentile: number,
-): RequiredScore | null {
+export function percentileSolver(course: Course, componentId: string): PercentileSolver | null {
     const comp = course.components.find((item) => item.id === componentId);
-    if (!comp || comp.scaleTargetId || !(comp.maxScore > 0) || !Number.isFinite(targetPercentile)) return null;
+    if (!comp || comp.scale || !(comp.maxScore > 0)) return null;
 
     const perSub = comp.statsMode === 'per-sub' && !!comp.subItems?.length;
     const ownDist = perSub ? null : componentDistribution(course, comp, new Set());
@@ -477,14 +638,34 @@ export function requiredScoreForPercentile(
     const leaf = leaves.find((item) => item.id === comp.id);
     if (!leaf) return null;
 
-    const target = Math.min(Math.max(targetPercentile, 0.01), 99.99);
-    const at = (score: number) => {
-        leaf.score = score;
-        return projectLeaves(leaves, course.classSize)?.percentile ?? NaN;
+    return {
+        maxScore: comp.maxScore,
+        assumedStats,
+        percentileAt(score: number) {
+            leaf.score = score;
+            return projectLeaves(leaves, course.classSize)?.percentile ?? NaN;
+        },
     };
+}
 
-    const M = comp.maxScore;
-    const result = (score: number): RequiredScore => ({ score, maxScore: M, reachable: score <= M, assumedStats });
+/**
+ * Raw score needed on a component for the course's projected final percentile to reach
+ * `targetPercentile`. Other unobserved components are projected from the resulting standing.
+ */
+export function requiredScoreForPercentile(
+    course: Course,
+    componentId: string,
+    targetPercentile: number,
+): RequiredScore | null {
+    if (!Number.isFinite(targetPercentile)) return null;
+    const solver = percentileSolver(course, componentId);
+    if (!solver) return null;
+
+    const target = Math.min(Math.max(targetPercentile, 0.01), 99.99);
+    const at = (score: number) => solver.percentileAt(score);
+
+    const M = solver.maxScore;
+    const result = (score: number): RequiredScore => ({ score, maxScore: M, reachable: score <= M, assumedStats: solver.assumedStats });
 
     const atZero = at(0);
     if (Number.isNaN(atZero)) return null;

@@ -1,10 +1,12 @@
-import type { Course, Component, SubItem, SemesterMeta } from '$lib/types';
+import type { Course, Component, ScaleRule, SubItem, SemesterMeta } from '$lib/types';
+import { getContext, setContext } from 'svelte';
 import {
     computeEffectiveCompPct,
     courseCurvedGrade,
     wouldCreateScaleCycle,
     type CourseCurvedGrade,
 } from '$lib/gradeMath';
+import { base } from '$app/paths';
 import { SaveQueue, type SaveState } from '$lib/saveQueue.svelte';
 
 function generateId(): string {
@@ -34,13 +36,19 @@ export class ApiError extends Error {
     }
 }
 
-/** JSON request helper; throws ApiError on non-2xx responses */
+/** Session expired or signed out in another tab: go to the sign-in page */
+export function redirectIfSignedOut(res: Response): void {
+    if (res.status === 401) window.location.assign(`${base}/auth`);
+}
+
+/** JSON request helper (path is relative to the base path); throws ApiError on non-2xx responses */
 async function api<T = unknown>(path: string, method = 'GET', body?: unknown): Promise<T> {
-    const res = await fetch(path, {
+    const res = await fetch(base + path, {
         method,
         headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
         body: body !== undefined ? JSON.stringify(body) : undefined
     });
+    redirectIfSignedOut(res);
     const data = await res.json().catch(() => null);
     if (!res.ok) {
         const message = (data as { error?: string } | null)?.error ?? `${method} ${path} failed (${res.status})`;
@@ -61,16 +69,25 @@ export type PendingDelete = {
 
 export const UNDO_DELETE_MS = 6000;
 
-type ScaleRef = { item: Component | SubItem; targetId: string };
+type ScaleRef = { item: Component | SubItem; scale: ScaleRule };
+
+/** The rule without sources that would make `id` depend on itself; null if none are left */
+function acyclicRule(course: Course, id: string, rule: ScaleRule | null): ScaleRule | null {
+    if (!rule || rule.from === 'course') return rule;
+    const from = rule.from.filter((sourceId) => !wouldCreateScaleCycle(course, id, sourceId));
+    return from.length > 0 ? { ...rule, from } : null;
+}
+
+export type GradesSnapshot = { semesters: SemesterMeta[]; courses: Course[] };
 
 class GradesStore {
-    courses = $state<Course[]>([]);
-    /** Courses of every semester, for CGPA; use `courses` for the active semester */
+    /** Courses of every semester; the single copy that edits mutate */
     allCourses = $state<Course[]>([]);
     semesters = $state<SemesterMeta[]>([]);
     activeSemesterId = $state<string | null>(null);
+    /** Courses of the active semester */
+    courses = $derived(this.allCourses.filter((c) => c.semesterId === this.activeSemesterId));
     loaded = $state(false);
-    loadError = $state<string | null>(null);
     /** Items hidden from the UI whose DELETE is held back so it can be undone */
     pendingDeletes = $state<PendingDelete[]>([]);
     readonly saves = new SaveQueue();
@@ -106,6 +123,14 @@ class GradesStore {
         this.#patchCourse(courseId, 'credits', credits);
     }
 
+    setCourseName(courseId: string, field: 'name' | 'fullName', value: string): void {
+        const course = this.getCourse(courseId);
+        const trimmed = value.trim();
+        if (!course || !trimmed || trimmed === course[field]) return;
+        course[field] = trimmed;
+        this.#patchCourse(courseId, field, trimmed);
+    }
+
     setOfficialGrade(courseId: string, grade: string | null): void {
         const course = this.getCourse(courseId);
         if (!course) return;
@@ -117,33 +142,28 @@ class GradesStore {
         return this.semesters.find((s) => s.id === this.activeSemesterId) ?? null;
     }
 
-    /** Load semesters then courses from the API */
-    async load(): Promise<void> {
-        if (this.loaded) return;
-        this.loadError = null;
-        try {
-            const sems = await api<SemesterMeta[]>('/api/semesters');
-            this.semesters = sems;
-            const active = sems.find((s) => s.isActive) ?? sems[sems.length - 1] ?? null;
-            this.activeSemesterId = active?.id ?? null;
-            await this.#loadCoursesForSemester(this.activeSemesterId);
-            await this.#loadAllCourses();
-            this.loaded = true;
-        } catch (error) {
-            this.loadError = error instanceof Error ? error.message : 'could not reach the server';
-        }
+    constructor(initial: GradesSnapshot | null) {
+        if (!initial) return;
+        this.semesters = initial.semesters;
+        const active = initial.semesters.find((s) => s.isActive) ?? initial.semesters[initial.semesters.length - 1] ?? null;
+        this.activeSemesterId = active?.id ?? null;
+        this.allCourses = initial.courses;
+        this.loaded = true;
     }
 
     /** Force reload from DB (after pending writes have landed) */
     async reload(): Promise<void> {
         await this.#settle();
-        this.semesters = await api<SemesterMeta[]>('/api/semesters');
-        const active = this.semesters.find((s) => s.isActive) ?? this.semesters[this.semesters.length - 1] ?? null;
-        if (!this.activeSemesterId || !this.semesters.some((s) => s.id === this.activeSemesterId)) {
+        const [sems, courses] = await Promise.all([
+            api<SemesterMeta[]>('/api/semesters'),
+            api<Course[]>('/api/courses?all=1')
+        ]);
+        this.semesters = sems;
+        const active = sems.find((s) => s.isActive) ?? sems[sems.length - 1] ?? null;
+        if (!this.activeSemesterId || !sems.some((s) => s.id === this.activeSemesterId)) {
             this.activeSemesterId = active?.id ?? null;
         }
-        await this.#loadCoursesForSemester(this.activeSemesterId);
-        await this.#loadAllCourses();
+        this.allCourses = courses;
     }
 
     /** Quietly resync with the server unless local edits are still unsaved */
@@ -162,14 +182,13 @@ class GradesStore {
         await this.reload();
     }
 
-    /** Switch the viewed + active semester (persists to DB) */
-    async switchSemester(id: string): Promise<void> {
-        await this.#settle();
-        await api('/api/semesters/active', 'POST', { id });
+    /** Switch the viewed + active semester; courses are already loaded, the DB write is queued */
+    switchSemester(id: string): void {
+        if (id === this.activeSemesterId || !this.semesters.some((s) => s.id === id)) return;
+        this.commitPendingDeletes();
         this.semesters = this.semesters.map((s) => ({ ...s, isActive: s.id === id }));
         this.activeSemesterId = id;
-        await this.#loadCoursesForSemester(id);
-        await this.#loadAllCourses();
+        this.#save('semesters:active', '/api/semesters/active', 'POST', { id }, 0);
     }
 
     /** Create a new active semester, seeding its catalog courses in the same request */
@@ -184,7 +203,6 @@ class GradesStore {
         });
         this.semesters = [...this.semesters.map((s) => ({ ...s, isActive: false })), created.semester];
         this.activeSemesterId = created.semester.id;
-        this.courses = created.courses;
         this.allCourses = [...this.allCourses, ...created.courses];
         return created.semester;
     }
@@ -221,12 +239,8 @@ class GradesStore {
         this.allCourses = this.allCourses.filter((c) => c.semesterId !== id);
         if (this.activeSemesterId === id) {
             const next = this.semesters[this.semesters.length - 1] ?? null;
-            if (next) {
-                await this.switchSemester(next.id);
-            } else {
-                this.activeSemesterId = null;
-                this.courses = [];
-            }
+            if (next) this.switchSemester(next.id);
+            else this.activeSemesterId = null;
         }
     }
 
@@ -238,31 +252,25 @@ class GradesStore {
             color,
             semesterId: this.activeSemesterId
         });
-        this.courses = [...this.courses, created];
         this.allCourses = [...this.allCourses, created];
         this.#bumpCourseCount(1);
     }
 
     /** Seed courses from the catalog for a given branch + semester into the active semester */
     async seedFromCatalog(branch: string, semester: string): Promise<void> {
-        if (!this.activeSemesterId) return;
-        const seeded = await api<Course[]>('/api/courses/seed', 'POST', {
-            branch,
-            semester,
-            semesterId: this.activeSemesterId
-        });
-        this.courses = seeded;
+        const semesterId = this.activeSemesterId;
+        if (!semesterId) return;
+        const seeded = await api<Course[]>('/api/courses/seed', 'POST', { branch, semester, semesterId });
+        this.allCourses = [...this.allCourses.filter((c) => c.semesterId !== semesterId), ...seeded];
         this.semesters = this.semesters.map((s) =>
-            s.id === this.activeSemesterId ? { ...s, courseCount: seeded.length } : s
+            s.id === semesterId ? { ...s, courseCount: seeded.length } : s
         );
-        await this.#loadAllCourses();
     }
 
     /** Delete a course */
     async deleteCourse(courseId: string): Promise<void> {
         await this.#settle();
         await api('/api/courses', 'DELETE', { id: courseId });
-        this.courses = this.courses.filter((c) => c.id !== courseId);
         this.allCourses = this.allCourses.filter((c) => c.id !== courseId);
         this.#bumpCourseCount(-1);
     }
@@ -270,11 +278,12 @@ class GradesStore {
     /** Import a JSON export as new semester(s); returns how many were added */
     async importData(payload: string): Promise<number> {
         await this.#settle();
-        const res = await fetch('/api/import', {
+        const res = await fetch(`${base}/api/import`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: payload
         });
+        redirectIfSignedOut(res);
         const data = (await res.json().catch(() => null)) as { semesters?: SemesterMeta[]; error?: string } | null;
         if (!res.ok) throw new ApiError(data?.error ?? `import failed (${res.status})`, res.status);
         await this.reload();
@@ -288,23 +297,26 @@ class GradesStore {
     /** Make sure a course is loaded, switching to its semester if needed; false if it doesn't exist */
     async ensureCourse(courseId: string): Promise<boolean> {
         if (this.getCourse(courseId)) return true;
-        try {
-            const course = await api<Course>(`/api/courses/${encodeURIComponent(courseId)}`);
-            if (course.semesterId && course.semesterId !== this.activeSemesterId) {
-                await this.switchSemester(course.semesterId);
+        if (!this.allCourses.some((c) => c.id === courseId)) {
+            try {
+                await api<Course>(`/api/courses/${encodeURIComponent(courseId)}`);
+            } catch (error) {
+                if (error instanceof ApiError && (error.status === 404 || error.status === 400)) return false;
+                throw error;
             }
-            return this.getCourse(courseId) !== undefined;
-        } catch (error) {
-            if (error instanceof ApiError && (error.status === 404 || error.status === 400)) return false;
-            throw error;
+            // Created in another tab: pick it up along with any new semester
+            await this.reload();
         }
+        const semesterId = this.allCourses.find((c) => c.id === courseId)?.semesterId;
+        if (semesterId) this.switchSemester(semesterId);
+        return this.getCourse(courseId) !== undefined;
     }
 
     // ─── Direct score (top-level) ───────────────────────────────────────────────
 
     updateScore(courseId: string, componentId: string, score: number | null): void {
         const comp = this.#getComp(courseId, componentId);
-        if (!comp || comp.scaleTargetId) return;
+        if (!comp || comp.scale) return;
         comp.score = score;
         this.#patchComponent(componentId, 'score', score);
     }
@@ -313,18 +325,16 @@ class GradesStore {
 
     updateSubScore(courseId: string, componentId: string, subItemId: string, score: number | null): void {
         const comp = this.#getComp(courseId, componentId);
-        if (comp?.scaleTargetId) return;
+        if (comp?.scale) return;
         const sub = this.#getSub(courseId, componentId, subItemId);
-        if (!sub || sub.scaleTargetId) return;
+        if (!sub || sub.scale) return;
         sub.score = score;
         this.#patchSub(subItemId, 'score', score);
     }
 
     updateSubMaxScore(courseId: string, componentId: string, subItemId: string, maxScore: number): void {
-        const comp = this.#getComp(courseId, componentId);
-        if (comp?.scaleTargetId) return;
         const sub = this.#getSub(courseId, componentId, subItemId);
-        if (!sub || sub.scaleTargetId) return;
+        if (!sub) return;
         sub.maxScore = maxScore;
         this.#patchSub(subItemId, 'maxScore', maxScore);
     }
@@ -409,7 +419,7 @@ class GradesStore {
 
     updateMaxScore(courseId: string, componentId: string, maxScore: number): void {
         const comp = this.#getComp(courseId, componentId);
-        if (!comp || comp.scaleTargetId) return;
+        if (!comp) return;
         comp.maxScore = maxScore;
         this.#patchComponent(componentId, 'maxScore', maxScore);
     }
@@ -474,7 +484,6 @@ class GradesStore {
     async resetCourse(courseId: string): Promise<void> {
         await this.#settle();
         const course = await api<Course>(`/api/courses/${encodeURIComponent(courseId)}/reset`, 'POST');
-        this.courses = this.courses.map((c) => (c.id === courseId ? course : c));
         this.allCourses = this.allCourses.map((c) => (c.id === courseId ? course : c));
     }
 
@@ -482,7 +491,7 @@ class GradesStore {
 
     updateClassStats(courseId: string, componentId: string, field: StatField, value: number | null): void {
         const comp = this.#getComp(courseId, componentId);
-        if (!comp || comp.scaleTargetId) return;
+        if (!comp) return;
         comp[field] = value;
         this.#patchComponent(componentId, field, value);
     }
@@ -494,29 +503,32 @@ class GradesStore {
         this.#patchComponent(componentId, 'statsMode', mode);
     }
 
-    updateScaleTarget(courseId: string, componentId: string, targetId: string | null): void {
+    /** Scale a component from other items (null stops scaling); sources that would loop are dropped */
+    updateScale(courseId: string, componentId: string, rule: ScaleRule | null): void {
         const course = this.getCourse(courseId);
         const comp = this.#getComp(courseId, componentId);
         if (!course || !comp) return;
-        if (targetId && wouldCreateScaleCycle(course, componentId, targetId)) return;
-        comp.scaleTargetId = targetId;
-        this.#patchComponent(componentId, 'scaleTargetId', targetId);
+        const next = acyclicRule(course, componentId, rule);
+        if (rule && !next) return;
+        comp.scale = next;
+        this.#patchComponent(componentId, 'scale', next);
     }
 
     updateSubClassStats(courseId: string, componentId: string, subItemId: string, field: StatField, value: number | null): void {
         const sub = this.#getSub(courseId, componentId, subItemId);
-        if (!sub || sub.scaleTargetId) return;
+        if (!sub) return;
         sub[field] = value;
         this.#patchSub(subItemId, field, value);
     }
 
-    updateSubScaleTarget(courseId: string, componentId: string, subItemId: string, targetId: string | null): void {
+    updateSubScale(courseId: string, componentId: string, subItemId: string, rule: ScaleRule | null): void {
         const course = this.getCourse(courseId);
         const sub = this.#getSub(courseId, componentId, subItemId);
         if (!course || !sub) return;
-        if (targetId && wouldCreateScaleCycle(course, subItemId, targetId)) return;
-        sub.scaleTargetId = targetId;
-        this.#patchSub(subItemId, 'scaleTargetId', targetId);
+        const next = acyclicRule(course, subItemId, rule);
+        if (rule && !next) return;
+        sub.scale = next;
+        this.#patchSub(subItemId, 'scale', next);
     }
 
     // ─── Derived computations ───────────────────────────────────────────────────
@@ -563,10 +575,15 @@ class GradesStore {
         return course ? courseCurvedGrade(course) : null;
     }
 
+    /** Wait for queued writes (e.g. before signing out) */
+    settle(): Promise<void> {
+        return this.#settle();
+    }
+
     // ─── Private helpers ────────────────────────────────────────────────────────
 
     #save(key: string, path: string, method: string, body: unknown, delayMs = 300): void {
-        this.saves.enqueue(key, { path, method, body }, delayMs);
+        this.saves.enqueue(key, { path: base + path, method, body }, delayMs);
     }
 
     #patchComponent(id: string, field: string, value: unknown): void {
@@ -602,22 +619,23 @@ class GradesStore {
         job.commit();
     }
 
-    /** Null out scale targets pointing at `ids` locally (the server does the same on DELETE) */
+    /** Drop `ids` from scale rules locally (the server does the same on DELETE); a rule left empty is cleared */
     #detachScaleRefs(course: Course, ids: Set<string>): ScaleRef[] {
         const refs: ScaleRef[] = [];
         for (const comp of course.components) {
             for (const item of [comp, ...(comp.subItems ?? [])]) {
-                if (item.scaleTargetId && ids.has(item.scaleTargetId) && !ids.has(item.id)) {
-                    refs.push({ item, targetId: item.scaleTargetId });
-                    item.scaleTargetId = null;
-                }
+                const rule = item.scale;
+                if (!rule || rule.from === 'course' || ids.has(item.id) || !rule.from.some((id) => ids.has(id))) continue;
+                refs.push({ item, scale: rule });
+                const from = rule.from.filter((id) => !ids.has(id));
+                item.scale = from.length > 0 ? { ...rule, from } : null;
             }
         }
         return refs;
     }
 
     #restoreScaleRefs(refs: ScaleRef[]): void {
-        for (const ref of refs) ref.item.scaleTargetId = ref.targetId;
+        for (const ref of refs) ref.item.scale = ref.scale;
     }
 
     #bumpCourseCount(delta: number): void {
@@ -625,14 +643,6 @@ class GradesStore {
         this.semesters = this.semesters.map((s) =>
             s.id === this.activeSemesterId ? { ...s, courseCount: Math.max(0, s.courseCount + delta) } : s
         );
-    }
-
-    async #loadCoursesForSemester(semesterId: string | null): Promise<void> {
-        this.courses = semesterId ? await api<Course[]>(`/api/courses?semesterId=${encodeURIComponent(semesterId)}`) : [];
-    }
-
-    async #loadAllCourses(): Promise<void> {
-        this.allCourses = await api<Course[]>('/api/courses?all=1');
     }
 
     #getComp(courseId: string, componentId: string): Component | undefined {
@@ -644,4 +654,15 @@ class GradesStore {
     }
 }
 
-export const grades = new GradesStore();
+// Each layout owns its store, including during SSR. Never share account data across requests.
+const gradesContext = Symbol('grades');
+
+export function provideGrades(initial: GradesSnapshot | null): GradesStore {
+    return setContext(gradesContext, new GradesStore(initial));
+}
+
+export function getGrades(): GradesStore {
+    const grades = getContext<GradesStore | undefined>(gradesContext);
+    if (!grades) throw new Error('Grades must be provided by the root layout');
+    return grades;
+}

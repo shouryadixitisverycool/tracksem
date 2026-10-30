@@ -1,5 +1,7 @@
 <script lang="ts">
-    import { grades, UNDO_DELETE_MS } from "$lib/stores/grades.svelte";
+    import { getGrades, UNDO_DELETE_MS } from "$lib/stores/grades.svelte";
+
+    const grades = getGrades();
 </script>
 
 {#if grades.pendingDeletes.length > 0}

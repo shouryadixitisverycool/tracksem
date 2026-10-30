@@ -1,7 +1,10 @@
 <script lang="ts">
     import { goto } from "$app/navigation";
-    import { grades } from "$lib/stores/grades.svelte";
+    import { resolve } from "$app/paths";
+    import { getGrades } from "$lib/stores/grades.svelte";
     import { BRANCHES, getSemesters, getCourses } from "$lib/data/courses";
+
+    const grades = getGrades();
 
     const isFirstSemester = $derived(grades.semesters.length === 0);
 
@@ -37,7 +40,7 @@
         const label = (semesterLabel.trim() || `${selectedBranch} · ${selectedSemester}`).slice(0, 100);
         try {
             await grades.createSemester(label, selectedBranch, selectedSemester);
-            goto("/");
+            goto(resolve("/"));
         } catch (error) {
             startError = error instanceof Error ? error.message : "could not create the semester";
         } finally {
@@ -57,7 +60,7 @@
                 </div>
             </div>
             {#if !isFirstSemester}
-                <a href="/" class="cancel-link mono">← back</a>
+                <a href={resolve("/")} class="cancel-link mono">← back</a>
             {/if}
         </div>
     </header>

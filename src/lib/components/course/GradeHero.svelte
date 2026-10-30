@@ -1,135 +1,75 @@
 <script lang="ts">
     import type { Course } from "$lib/types";
     import type { CourseCurvedGrade } from "$lib/gradeMath";
-    import { grades } from "$lib/stores/grades.svelte";
-    import { getGradeColor, getLetterGrade, LETTERS } from "$lib/grading";
-    import GradeVisibilityButton from "$lib/components/GradeVisibilityButton.svelte";
-    import NumberField from "$lib/components/NumberField.svelte";
+    import { getGradeColor, getLetterGrade } from "$lib/grading";
+    import { courseProgress } from "$lib/need";
+    import { fmt } from "./display";
 
     interface Props {
         course: Course;
         proj: { grade: number | null; filled: number; total: number };
         curved: CourseCurvedGrade | null;
         totalWeight: number;
+        onsetup: () => void;
     }
 
-    let { course, proj, curved, totalWeight }: Props = $props();
+    let { course, proj, curved, totalWeight, onsetup }: Props = $props();
 
     const gradeColor = $derived(getGradeColor(proj.grade));
-    const uid = $props.id();
+    const progress = $derived(courseProgress(course));
+    const earned = $derived(progress.secured);
+    const lost = $derived(Math.max(100 - progress.maxPossible, 0));
+    const open = $derived(Math.max(progress.maxPossible - progress.secured, 0));
 </script>
 
-<div class="hero" style="--accent: {course.color}">
-    <div class="hero-left">
-        <div class="course-chip mono" style="color: {course.color}; border-color: {course.color}30">
-            {course.name}
-        </div>
-        <h1 class="course-fullname">{course.fullName}</h1>
-        <div class="meta mono">
-            {proj.filled}/{proj.total} components graded
-            {#if totalWeight !== 100}
-                · <span style="color: #fb923c">⚠ weights sum to {totalWeight}%</span>
-            {:else}
-                · <span style="color: oklch(0.4 0.02 265)">weights OK</span>
+<section class="hero" style="--accent: {course.color}" aria-label="{course.name} grade">
+    <div class="hero-top">
+        <div>
+            <span class="course-chip mono" style="color: {course.color}; border-color: {course.color}40">{course.name}</span>
+            <h1 class="course-fullname">{course.fullName}</h1>
+            <div class="dim mono hero-meta">
+                {proj.filled} of {proj.total} graded
+                {#if course.credits != null}· {fmt(course.credits)} credits{/if}
+                {#if course.classSize != null}· class of {course.classSize}{/if}
+                {#if totalWeight !== 100}
+                    · <button class="link warn" onclick={onsetup}>⚠ weights add up to {fmt(totalWeight)}%</button>
+                {/if}
+            </div>
+            {#if course.officialGrade}
+                <span class="official-badge mono">official grade: {course.officialGrade}</span>
             {/if}
         </div>
-        <div class="course-meta-row mono">
-            <span class="meta-field" title="Used to estimate how far above the average the topper sits">
-                <label for="{uid}-size">class size</label>
-                <NumberField
-                    id="{uid}-size"
-                    class="num-input mono class-size-input"
-                    integer
-                    exclusiveMin
-                    placeholder="?"
-                    value={course.classSize}
-                    onCommit={(v) => grades.setClassSize(course.id, v)}
-                />
-            </span>
-            <span class="meta-field" title="Course credits, used for SGPA / CGPA">
-                <label for="{uid}-credits">credits</label>
-                <NumberField
-                    id="{uid}-credits"
-                    class="num-input mono class-size-input"
-                    max={40}
-                    placeholder="?"
-                    value={course.credits}
-                    onCommit={(v) => grades.setCredits(course.id, v)}
-                />
-            </span>
-            <span class="meta-field" title="Final grade once released; overrides predictions in SGPA / CGPA">
-                <label for="{uid}-official">official grade</label>
-                <select
-                    id="{uid}-official"
-                    class="meta-select mono"
-                    value={course.officialGrade ?? ""}
-                    onchange={(e) => grades.setOfficialGrade(course.id, e.currentTarget.value || null)}
-                >
-                    <option value="">not out</option>
-                    {#each LETTERS as letter (letter)}
-                        <option value={letter}>{letter}</option>
-                    {/each}
-                </select>
-            </span>
-        </div>
-    </div>
-    <div class="hero-grade">
-        <div class="hero-grade-row">
-            <div class="hero-grade-col">
-                <div class="letter-grade mono" style="color: {gradeColor}">
-                    {getLetterGrade(proj.grade)}
-                </div>
+        <div class="hero-grades">
+            <div class="hero-grade">
+                <div class="letter-grade mono" style="color: {gradeColor}">{getLetterGrade(proj.grade)}</div>
                 {#if proj.grade !== null}
-                    <div class="pct-grade mono" style="color: {gradeColor}">
-                        {proj.grade.toFixed(2)}%
-                    </div>
+                    <div class="pct-grade mono" style="color: {gradeColor}">{proj.grade.toFixed(2)}%</div>
                 {:else}
-                    <div class="grade-note">enter scores to see projection</div>
+                    <div class="grade-note mono">enter scores to see a grade</div>
                 {/if}
-                <div class="grade-label">
-                    <GradeVisibilityButton
-                        label="absolute"
-                        hidden={course.hideAbsoluteGrade}
-                        onchange={(hidden) => grades.setGradeVisibility(course.id, "hideAbsoluteGrade", hidden)}
-                    />
-                    <span>absolute</span>
-                </div>
             </div>
             <div class="hero-grade-divider"></div>
-            <div class="hero-grade-col">
+            <div class="hero-grade">
                 {#if curved}
-                    <div class="letter-grade curved-letter mono" style="color: {curved.color}">
-                        {curved.letter}
-                    </div>
-                    <div class="pct-grade mono" style="color: {curved.color}">
-                        P{curved.percentile.toFixed(0)}
-                    </div>
-                    {#if curved.coverage < 1}
-                        <div class="coverage-note mono">based on {Math.round(curved.coverage * 100)}% of course</div>
-                    {/if}
-                    {#if curved.projected}
-                        <div class="coverage-note mono" style="color: {curved.projected.color}">
-                            projected final: {curved.projected.letter} (P{curved.projected.percentile.toFixed(0)})
-                        </div>
-                    {/if}
+                    <div class="letter-grade curved-letter mono" style="color: {curved.color}">{curved.letter}</div>
+                    <div class="pct-grade mono" style="color: {curved.color}">P{Math.floor(curved.percentile)}</div>
                 {:else}
-                    <div class="letter-grade curved-letter mono" style="color: oklch(0.45 0.02 265)">—</div>
-                    <div class="grade-note">add class stats to see projection</div>
+                    <div class="letter-grade curved-letter mono dim">—</div>
+                    <div class="grade-note mono">add class stats to see the curve</div>
                 {/if}
-                <div class="grade-label">
-                    <GradeVisibilityButton
-                        label="relative"
-                        hidden={course.hideRelativeGrade}
-                        onchange={(hidden) => grades.setGradeVisibility(course.id, "hideRelativeGrade", hidden)}
-                    />
-                    <span>curved</span>
-                </div>
+                <div class="grade-label mono">curved</div>
             </div>
         </div>
-        {#if course.officialGrade}
-            <div class="official-badge mono" style="color: #22d3ee; border-color: #22d3ee40">
-                official: {course.officialGrade}
-            </div>
-        {/if}
     </div>
-</div>
+
+    <div class="progress" aria-hidden="true">
+        <div class="earned" style="width: {earned}%"></div>
+        <div class="lost" style="width: {lost}%"></div>
+        <div class="open" style="width: {open}%"></div>
+    </div>
+    <div class="legend mono">
+        <span style="--c: #4ade80">{earned.toFixed(1)} pts earned</span>
+        <span style="--c: #f8717199">{lost.toFixed(1)} lost</span>
+        <span style="--c: oklch(1 0 0 / 14%)">{open.toFixed(1)} still open</span>
+    </div>
+</section>

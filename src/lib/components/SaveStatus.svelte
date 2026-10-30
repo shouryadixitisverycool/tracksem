@@ -1,5 +1,7 @@
 <script lang="ts">
-    import { grades } from "$lib/stores/grades.svelte";
+    import { getGrades } from "$lib/stores/grades.svelte";
+
+    const grades = getGrades();
 
     const saveState = $derived(grades.saveState);
     const failures = $derived(grades.saves.failures);

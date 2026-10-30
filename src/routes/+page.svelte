@@ -1,10 +1,14 @@
 <script lang="ts">
     import { goto } from "$app/navigation";
-    import { grades } from "$lib/stores/grades.svelte";
+    import { resolve } from "$app/paths";
+    import { page } from "$app/state";
+    import { getGrades } from "$lib/stores/grades.svelte";
     import CourseCard from "$lib/components/CourseCard.svelte";
     import SaveStatus from "$lib/components/SaveStatus.svelte";
     import { getGpaColor, getGradeColor } from "$lib/grading";
-    import { absoluteGrade, computeGpa, curvedLetter, gradeForGpa, type GpaBasis } from "$lib/gpa";
+    import { computeGpa, gradeForGpa } from "$lib/gpa";
+
+    const grades = getGrades();
 
     /** Unweighted average of visible absolute grades */
     function getOverallGrade(): { grade: number | null; count: number } {
@@ -24,45 +28,33 @@
 
     const overall = $derived(getOverallGrade());
 
-    // ─── SGPA / CGPA ─────────────────────────────────────────────────────────────
+    // ─── SGPA ────────────────────────────────────────────────────────────────────
 
-    const GPA_BASIS_KEY = "tracksem:gpaBasis";
-    let gpaBasis = $state<GpaBasis>(
-        typeof localStorage !== "undefined" && localStorage.getItem(GPA_BASIS_KEY) === "absolute" ? "absolute" : "curved"
-    );
-
-    function toggleGpaBasis() {
-        gpaBasis = gpaBasis === "curved" ? "absolute" : "curved";
-        localStorage.setItem(GPA_BASIS_KEY, gpaBasis);
-    }
-
-    const activeGpaEntries = $derived(
-        grades.courses.map((course) => ({
-            credits: course.credits,
-            letter: gradeForGpa(
-                course,
-                gpaBasis,
-                grades.projectedGrade(course.id).grade,
-                grades.curvedGrade(course.id)?.letter ?? null
-            ).letter
-        }))
-    );
-    const sgpa = $derived(computeGpa(activeGpaEntries));
-    const cgpa = $derived(
-        computeGpa([
-            ...activeGpaEntries,
-            ...grades.allCourses
-                .filter((course) => course.semesterId !== grades.activeSemesterId)
-                .map((course) => ({
-                    credits: course.credits,
-                    letter: gradeForGpa(course, gpaBasis, absoluteGrade(course), curvedLetter(course)).letter
-                }))
-        ])
+    const sgpa = $derived(
+        computeGpa(
+            grades.courses.map((course) => ({
+                credits: course.credits,
+                letter: gradeForGpa(
+                    course,
+                    "curved",
+                    grades.projectedGrade(course.id).grade,
+                    grades.curvedGrade(course.id)?.letter ?? null
+                ).letter
+            }))
+        )
     );
 
     // ─── Export / import ─────────────────────────────────────────────────────────
 
     let dataMenuOpen = $state(false);
+    let signingOut = $state(false);
+
+    async function signOut() {
+        signingOut = true;
+        await grades.settle();
+        await fetch(resolve("/api/auth/logout"), { method: "POST" }).catch(() => null);
+        window.location.assign(resolve("/auth"));
+    }
     let importing = $state(false);
     let dataMessage = $state<{ text: string; error: boolean } | null>(null);
 
@@ -138,7 +130,7 @@
     // ─── Onboarding (no semesters yet → /new-semester) ───────────────────────────
 
     $effect(() => {
-        if (grades.loaded && grades.semesters.length === 0) goto("/new-semester");
+        if (grades.loaded && grades.semesters.length === 0) goto(resolve("/new-semester"));
     });
 
     let seeding = $state(false);
@@ -187,15 +179,9 @@
 
     let switcherError = $state<string | null>(null);
 
-    async function handleSwitch(id: string) {
-        if (id === grades.activeSemesterId) { closeSwitcher(); return; }
-        switcherError = null;
-        try {
-            await grades.switchSemester(id);
-            closeSwitcher();
-        } catch (error) {
-            switcherError = error instanceof Error ? error.message : "could not switch semester";
-        }
+    function handleSwitch(id: string) {
+        grades.switchSemester(id);
+        closeSwitcher();
     }
 
 	function startRename(id: string, currentLabel: string) {
@@ -411,7 +397,7 @@
 								<div class="sem-divider"></div>
 								<button
 									class="sem-new-btn mono"
-									onclick={() => { closeSwitcher(); goto('/new-semester'); }}
+									onclick={() => { closeSwitcher(); goto(resolve('/new-semester')); }}
 									role="menuitem"
 								>
 									+ new semester
@@ -429,31 +415,11 @@
                     <div
                         class="overall-pill"
                         style="border-color: {getGpaColor(sgpa.gpa)}40; color: {getGpaColor(sgpa.gpa)}"
-                        title="{sgpa.counted} of {sgpa.total} courses · {sgpa.credits} credits (official grade, else predicted {gpaBasis} letter)"
+                        title="{sgpa.counted} of {sgpa.total} courses · {sgpa.credits} credits (official grade, else predicted curved letter)"
                     >
                         <span class="mono text-xs" style="opacity: 0.6">SGPA</span>
                         <span class="mono text-sm">{sgpa.gpa.toFixed(2)}</span>
                     </div>
-                {/if}
-                {#if cgpa.gpa !== null}
-                    <div
-                        class="overall-pill"
-                        style="border-color: {getGpaColor(cgpa.gpa)}40; color: {getGpaColor(cgpa.gpa)}"
-                        title="{cgpa.counted} of {cgpa.total} courses across all semesters · {cgpa.credits} credits"
-                    >
-                        <span class="mono text-xs" style="opacity: 0.6">CGPA</span>
-                        <span class="mono text-sm">{cgpa.gpa.toFixed(2)}</span>
-                    </div>
-                {/if}
-                {#if sgpa.gpa !== null || cgpa.gpa !== null}
-                    <button
-                        class="basis-toggle mono"
-                        onclick={toggleGpaBasis}
-                        title="Letter used for SGPA/CGPA when no official grade is set (falls back to the other when unavailable)"
-                        aria-label="GPA uses {gpaBasis} predicted grades; switch"
-                    >
-                        {gpaBasis}
-                    </button>
                 {/if}
 
                 {#if overall.grade !== null}
@@ -486,10 +452,10 @@
                             aria-label="Close data menu"
                         ></button>
                         <div class="data-dropdown">
-                            <a class="data-item mono" href="/api/export" download onclick={() => (dataMenuOpen = false)}
+                            <a class="data-item mono" href={resolve("/api/export")} download onclick={() => (dataMenuOpen = false)}
                                 >export JSON</a
                             >
-                            <a class="data-item mono" href="/api/export/db" download onclick={() => (dataMenuOpen = false)}
+                            <a class="data-item mono" href={resolve("/api/export/db")} download onclick={() => (dataMenuOpen = false)}
                                 >download database backup</a
                             >
                             <label class="data-item mono">
@@ -502,6 +468,17 @@
                                     onchange={handleImport}
                                 />
                             </label>
+                            {#if page.data.user}
+                                <div class="data-divider" role="separator"></div>
+                                <div class="data-account mono">
+                                    {page.data.user.name}
+                                    <span>{page.data.user.rollNumber}</span>
+                                </div>
+                                <a class="data-item mono" href={resolve("/account")}>account & agents</a>
+                                <button class="data-item data-button mono" type="button" disabled={signingOut} onclick={signOut}>
+                                    {signingOut ? "signing out…" : "sign out"}
+                                </button>
+                            {/if}
                         </div>
                     {/if}
                 </div>
@@ -529,7 +506,7 @@
                     </div>
                     <button
                         class="onboard-btn mono"
-                        onclick={() => goto('/new-semester')}
+                        onclick={() => goto(resolve('/new-semester'))}
                     >
                         + set up a new semester
                     </button>
@@ -708,22 +685,6 @@
         opacity: 0.85;
     }
 
-    .basis-toggle {
-        background: oklch(1 0 0 / 4%);
-        border: 1px solid oklch(1 0 0 / 10%);
-        border-radius: 6px;
-        padding: 0.3rem 0.55rem;
-        color: oklch(0.6 0.02 265);
-        font-size: 0.62rem;
-        cursor: pointer;
-        letter-spacing: 0.04em;
-    }
-
-    .basis-toggle:hover {
-        color: oklch(0.9 0.01 265);
-        border-color: oklch(1 0 0 / 18%);
-    }
-
     .data-menu {
         position: relative;
     }
@@ -771,6 +732,31 @@
     .data-item:focus-within {
         background: oklch(1 0 0 / 5%);
         color: #22d3ee;
+    }
+
+    .data-button {
+        width: 100%;
+        background: none;
+        border: none;
+        text-align: left;
+    }
+
+    .data-divider {
+        height: 1px;
+        margin: 0.3rem 0;
+        background: oklch(1 0 0 / 8%);
+    }
+
+    .data-account {
+        padding: 0.4rem 0.8rem;
+        font-size: 0.7rem;
+        color: oklch(0.85 0.01 265);
+    }
+
+    .data-account span {
+        display: block;
+        margin-top: 2px;
+        color: oklch(0.5 0.02 265);
     }
 
     .visually-hidden {

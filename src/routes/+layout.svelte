@@ -1,14 +1,37 @@
 <script lang="ts">
 	import "./layout.css";
-	import { grades } from "$lib/stores/grades.svelte";
+	import { provideGrades } from "$lib/stores/grades.svelte";
+	import { untrack } from "svelte";
+	import { base } from "$app/paths";
 	import UndoToast from "$lib/components/UndoToast.svelte";
 
-	let { children } = $props();
+	let { children, data } = $props();
 
+	// The sign-in page renders without grades (and without a signed-in user)
+	const signedIn = $derived(data.user !== null);
+
+	// Seed SSR and hydration from the same snapshot. Keep this store across navigation
+	// so new layout data cannot overwrite optimistic edits or pending saves.
+	const grades = provideGrades(untrack(() => data.grades));
+
+	// Refetch when an agent changes data. EventSource reconnects on its own.
 	$effect(() => {
-		if (!grades.loaded && !grades.loadError) {
-			grades.load();
-		}
+		if (!signedIn) return;
+		const events = new EventSource(`${base}/api/events`);
+		let retry: ReturnType<typeof setTimeout> | null = null;
+		events.addEventListener("change", () => {
+			grades.refresh();
+			if (!grades.hasPendingWrites) return;
+			if (retry) clearTimeout(retry);
+			retry = setTimeout(() => {
+				retry = null;
+				grades.refresh();
+			}, 1500);
+		});
+		return () => {
+			if (retry) clearTimeout(retry);
+			events.close();
+		};
 	});
 
 	function handleBeforeUnload(event: BeforeUnloadEvent) {
@@ -18,7 +41,7 @@
 	}
 
 	function handleVisibilityChange() {
-		if (document.visibilityState === "visible") grades.refresh();
+		if (signedIn && document.visibilityState === "visible") grades.refresh();
 	}
 </script>
 
@@ -33,44 +56,7 @@
 	/>
 </svelte:head>
 
-{#if grades.loaded}
-	{@render children()}
+{@render children()}
+{#if signedIn}
 	<UndoToast />
-{:else if grades.loadError}
-	<div class="loading">
-		<span class="mono">couldn't load your grades: {grades.loadError}</span>
-		<button class="retry mono" onclick={() => grades.load()}>retry</button>
-	</div>
-{:else}
-	<div class="loading">
-		<span class="mono">loading…</span>
-	</div>
 {/if}
-
-<style>
-	.loading {
-		display: flex;
-		flex-direction: column;
-		gap: 0.75rem;
-		align-items: center;
-		justify-content: center;
-		min-height: 100vh;
-		padding: 1rem;
-		text-align: center;
-		color: oklch(0.5 0.02 265);
-		font-family: "JetBrains Mono", monospace;
-		font-size: 0.8rem;
-	}
-	.retry {
-		background: none;
-		border: 1px solid oklch(1 0 0 / 15%);
-		border-radius: 6px;
-		color: oklch(0.8 0.01 265);
-		padding: 0.4rem 0.9rem;
-		cursor: pointer;
-	}
-	.retry:hover {
-		border-color: #22d3ee66;
-		color: #22d3ee;
-	}
-</style>

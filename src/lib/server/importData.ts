@@ -1,4 +1,4 @@
-import type { Component, Course, SubItem } from '$lib/types';
+import type { Component, Course, ScaleRule, SubItem } from '$lib/types';
 import type { ImportSemester } from './db';
 import * as v from './validation';
 
@@ -40,6 +40,14 @@ function optionalRef(value: unknown): string | null {
 	return typeof value === 'string' && value.length > 0 && value.length <= 255 ? value : null;
 }
 
+/** Scale rule, or the single scaleTargetId of older exports; an unreadable rule is dropped */
+function scaleRule(raw: Obj): ScaleRule | null {
+	const parsed = v.scale(raw.scale);
+	if (parsed.ok && parsed.value) return parsed.value as ScaleRule;
+	const legacy = optionalRef(raw.scaleTargetId);
+	return legacy ? { from: [legacy], mode: 'absolute', combine: 'weight' } : null;
+}
+
 function stats(raw: Obj, where: string) {
 	return {
 		classAvg: check<number | null>(v.nonNegativeOrNull, raw.classAvg, `${where}.classAvg`),
@@ -57,7 +65,7 @@ function parseSubItem(value: unknown, where: string): SubItem {
 		name: check<string>(v.name, raw.name, `${where}.name`),
 		score: check<number | null>(v.nonNegativeOrNull, raw.score, `${where}.score`),
 		maxScore: check<number>(v.positiveNumber, raw.maxScore, `${where}.maxScore`),
-		scaleTargetId: optionalRef(raw.scaleTargetId),
+		scale: scaleRule(raw),
 		...stats(raw, where)
 	};
 }
@@ -75,7 +83,7 @@ function parseComponent(value: unknown, where: string): Component {
 		score: check<number | null>(v.nonNegativeOrNull, raw.score, `${where}.score`),
 		bestOf: check<number | null>(v.bestOf, raw.bestOf, `${where}.bestOf`) ?? undefined,
 		statsMode: raw.statsMode === 'per-sub' ? 'per-sub' : 'global',
-		scaleTargetId: optionalRef(raw.scaleTargetId),
+		scale: scaleRule(raw),
 		...stats(raw, where),
 		subItems: subItems.length > 0 ? subItems : undefined
 	};

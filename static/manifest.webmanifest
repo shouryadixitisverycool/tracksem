@@ -2,13 +2,13 @@
 	"name": "tracksem",
 	"short_name": "tracksem",
 	"description": "Semester grade tracker",
-	"start_url": "/",
-	"scope": "/",
+	"start_url": "./",
+	"scope": "./",
 	"display": "standalone",
 	"background_color": "#0b0d17",
 	"theme_color": "#0b0d17",
 	"icons": [
-		{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-		{ "src": "/favicon.png", "sizes": "45x37", "type": "image/png" }
+		{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+		{ "src": "favicon.png", "sizes": "45x37", "type": "image/png" }
 	]
 }

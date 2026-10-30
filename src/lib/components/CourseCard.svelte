@@ -1,7 +1,10 @@
 <script lang="ts">
-    import { grades, computeEffectiveCompPct } from "$lib/stores/grades.svelte";
+    import { getGrades, computeEffectiveCompPct } from "$lib/stores/grades.svelte";
     import { getGradeColor, getLetterGrade } from "$lib/grading";
     import type { Course } from "$lib/types";
+    import { resolve } from "$app/paths";
+
+    const grades = getGrades();
 
     interface Props {
         course: Course;
@@ -16,7 +19,7 @@
 </script>
 
 <div class="course-card group">
-    <a href="/course/{course.id}" class="card-link">
+    <a href={resolve("/course/[id]", { id: course.id })} class="card-link">
     <div class="card-inner" style="--accent: {course.color}">
         <!-- Header -->
         <div class="card-header">

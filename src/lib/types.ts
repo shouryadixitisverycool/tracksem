@@ -1,3 +1,13 @@
+/** Marks for an item worked out from other items instead of entered */
+export type ScaleRule = {
+  /** Ids of components or sub-items in the same course, or 'course' for every other component */
+  from: string[] | 'course';
+  /** absolute: the same %; relative: the same percentile, placed on this item's own class curve */
+  mode: 'absolute' | 'relative';
+  /** How several sources are averaged: by their course weight, or equally */
+  combine: 'weight' | 'equal';
+};
+
 export type SubItem = {
   id: string;
   name: string;
@@ -9,7 +19,7 @@ export type SubItem = {
   classStdDev?: number | null;
   /** Percentage (0–100) of the class that scored full marks */
   classFullPct?: number | null;
-  scaleTargetId?: string | null;
+  scale?: ScaleRule | null;
 };
 
 export type Component = {
@@ -21,7 +31,7 @@ export type Component = {
   subItems?: SubItem[];
   bestOf?: number;
   statsMode?: 'global' | 'per-sub';
-  scaleTargetId?: string | null;
+  scale?: ScaleRule | null;
   classAvg?: number | null;
   classMedian?: number | null;
   classMax?: number | null;

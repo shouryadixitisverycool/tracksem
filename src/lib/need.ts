@@ -1,5 +1,5 @@
 import type { Component, Course } from './types';
-import { computeEffectiveCompPct, computeEffectiveSubPct } from './stores/grades.svelte';
+import { computeEffectiveCompPct, computeEffectiveSubPct, getScaleTargetPct, scaleShares } from './gradeMath.ts';
 
 export type CourseProgress = {
     /** Weighted marks earned so far, on a 0–100 scale of the whole course */
@@ -33,9 +33,53 @@ export function courseProgress(course: Course): CourseProgress {
  */
 export type NeedMode = 'same' | 'last';
 
-/** Components the calculator can solve for (scaled components follow their target instead) */
-export function needCandidates(course: Course): Component[] {
-    return course.components.filter((comp) => !comp.scaleTargetId && comp.weight > 0);
+type NeedSplit = {
+    /** Weight of the component plus everything scaled to it */
+    solveWeight: number;
+    /** Weighted marks already earned elsewhere */
+    earned: number;
+    gradedWeight: number;
+    /** Weight of the other ungraded components */
+    otherUngraded: number;
+    totalWeight: number;
+};
+
+function needSplit(course: Course, componentId: string): NeedSplit | null {
+    if (!course.components.some((c) => c.id === componentId)) return null;
+    const split: NeedSplit = { solveWeight: 0, earned: 0, gradedWeight: 0, otherUngraded: 0, totalWeight: 0 };
+    for (const item of course.components) {
+        split.totalWeight += item.weight;
+        if (item.id === componentId) {
+            split.solveWeight += item.weight;
+            continue;
+        }
+        const shares = item.scale ? scaleShares(course, item.id, componentId) : null;
+        const share = shares?.get(componentId);
+        if (shares && share !== undefined) {
+            // Scaled partly from this component: that share moves with it, the rest is already decided
+            split.solveWeight += item.weight * share;
+            for (const [sourceId, other] of shares) {
+                const pct = sourceId === componentId ? null : getScaleTargetPct(course, sourceId, new Set([item.id]));
+                if (pct === null) continue;
+                split.earned += (pct * item.weight * other) / 100;
+                split.gradedWeight += item.weight * other;
+            }
+            continue;
+        }
+        const pct = computeEffectiveCompPct(course, item);
+        if (pct === null) {
+            split.otherUngraded += item.weight;
+        } else {
+            split.earned += (pct * item.weight) / 100;
+            split.gradedWeight += item.weight;
+        }
+    }
+    return split.solveWeight > 0 ? split : null;
+}
+
+/** True when scaled component `item` takes part of its marks from `componentId` */
+function scalesFrom(course: Course, item: Component, componentId: string): boolean {
+    return !!item.scale && scaleShares(course, item.id, componentId).has(componentId);
 }
 
 /**
@@ -43,33 +87,48 @@ export function needCandidates(course: Course): Component[] {
  * Components scaled to it move with it. Returns null when it carries no weight.
  */
 export function requiredPct(course: Course, componentId: string, targetPct: number, mode: NeedMode): number | null {
-    const comp = course.components.find((c) => c.id === componentId);
-    if (!comp) return null;
+    const s = needSplit(course, componentId);
+    if (!s) return null;
+    if (mode === 'same') return ((targetPct * s.totalWeight) / 100 - s.earned) * 100 / (s.solveWeight + s.otherUngraded);
+    return ((targetPct * (s.gradedWeight + s.solveWeight)) / 100 - s.earned) * 100 / s.solveWeight;
+}
 
-    let solveWeight = 0;
+/** Course % if the component averages `pct`%: the inverse of `requiredPct` */
+export function projectedPctIfScored(course: Course, componentId: string, pct: number, mode: NeedMode): number | null {
+    const s = needSplit(course, componentId);
+    if (!s) return null;
+    if (mode === 'same') return s.totalWeight > 0 ? ((s.earned + (pct * (s.solveWeight + s.otherUngraded)) / 100) * 100) / s.totalWeight : null;
+    return ((s.earned + (pct * s.solveWeight) / 100) * 100) / (s.gradedWeight + s.solveWeight);
+}
+
+/** Ungraded components other than `componentId` and the items scaled to it */
+export function otherUngraded(course: Course, componentId: string): Component[] {
+    return course.components.filter(
+        (item) =>
+            item.id !== componentId &&
+            !scalesFrom(course, item, componentId) &&
+            item.weight > 0 &&
+            computeEffectiveCompPct(course, item) === null
+    );
+}
+
+/** Average % every ungraded component needs for the course to reach `targetPct`; null when nothing is left */
+export function requiredAcrossRemaining(course: Course, targetPct: number): { pct: number; remaining: Component[] } | null {
     let earned = 0;
-    let gradedWeight = 0;
-    let otherUngraded = 0;
-    let totalWeight = 0;
-
-    for (const item of course.components) {
-        totalWeight += item.weight;
-        if (item.id === componentId || item.scaleTargetId === componentId) {
-            solveWeight += item.weight;
-            continue;
-        }
-        const pct = computeEffectiveCompPct(course, item);
-        if (pct === null) {
-            otherUngraded += item.weight;
-        } else {
-            earned += (pct * item.weight) / 100;
-            gradedWeight += item.weight;
+    let open = 0;
+    let total = 0;
+    const remaining: Component[] = [];
+    for (const comp of course.components) {
+        total += comp.weight;
+        const pct = computeEffectiveCompPct(course, comp);
+        if (pct !== null) earned += (pct * comp.weight) / 100;
+        else if (comp.weight > 0) {
+            open += comp.weight;
+            remaining.push(comp);
         }
     }
-
-    if (solveWeight <= 0) return null;
-    if (mode === 'same') return ((targetPct * totalWeight) / 100 - earned) * 100 / (solveWeight + otherUngraded);
-    return ((targetPct * (gradedWeight + solveWeight)) / 100 - earned) * 100 / solveWeight;
+    if (open <= 0) return null;
+    return { pct: ((targetPct * total) / 100 - earned) * 100 / open, remaining };
 }
 
 /**

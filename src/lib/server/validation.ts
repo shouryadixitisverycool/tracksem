@@ -50,10 +50,26 @@ export const name: Validator = (value) => {
 	return ok(trimmed);
 };
 
-/** Shape check only; same-course and cycle checks need the course and live in db.ts */
-export const scaleTargetId: Validator = (value) => {
-	if (value === null || value === undefined || value === '') return ok(null);
-	return isSafeId(value) ? ok(value) : fail('invalid scale target');
+export const MAX_SCALE_SOURCES = 50;
+
+/**
+ * A scale rule ({ from: ids | 'course', mode, combine }) or null to stop scaling. Shape check only;
+ * same-course and cycle checks need the course and live in db.ts.
+ */
+export const scale: Validator = (value) => {
+	if (value === null || value === undefined) return ok(null);
+	if (typeof value !== 'object' || Array.isArray(value)) return fail('scale must be an object or null');
+	const raw = value as Record<string, unknown>;
+	const mode = raw.mode ?? 'absolute';
+	const combine = raw.combine ?? 'weight';
+	if (mode !== 'absolute' && mode !== 'relative') return fail("scale mode must be 'absolute' or 'relative'");
+	if (combine !== 'weight' && combine !== 'equal') return fail("scale combine must be 'weight' or 'equal'");
+
+	if (raw.from === 'course') return ok({ from: 'course', mode, combine });
+	if (!Array.isArray(raw.from) || raw.from.length === 0) return fail("scale from must be a list of item ids or 'course'");
+	if (raw.from.length > MAX_SCALE_SOURCES) return fail(`scale from can list at most ${MAX_SCALE_SOURCES} items`);
+	if (!raw.from.every(isSafeId)) return fail('invalid scale source id');
+	return ok({ from: [...new Set(raw.from as string[])], mode, combine });
 };
 
 export const classSize: Validator = (value) => {
@@ -81,7 +97,7 @@ export const COMPONENT_FIELDS: Record<string, Validator> = {
 	name,
 	bestOf,
 	statsMode,
-	scaleTargetId,
+	scale,
 	classAvg: nonNegativeOrNull,
 	classMedian: nonNegativeOrNull,
 	classMax: nonNegativeOrNull,
@@ -93,7 +109,7 @@ export const SUB_ITEM_FIELDS: Record<string, Validator> = {
 	score: nonNegativeOrNull,
 	maxScore: positiveNumber,
 	name,
-	scaleTargetId,
+	scale,
 	classAvg: nonNegativeOrNull,
 	classMedian: nonNegativeOrNull,
 	classMax: nonNegativeOrNull,
@@ -102,6 +118,8 @@ export const SUB_ITEM_FIELDS: Record<string, Validator> = {
 };
 
 export const COURSE_FIELDS: Record<string, Validator> = {
+	name,
+	fullName: name,
 	classSize,
 	credits,
 	officialGrade
